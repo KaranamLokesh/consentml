@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "consentml"
+version = "0.1.0.dev0"
+description = "Data-lineage tracking and consent-revocation reporting for ML pipelines"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["pandas>=2.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov", "scikit-learn"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/consentml"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
