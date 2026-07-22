@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from consentml.store import LineageStore
+from consentml.store import LineageStore, default_db_path
 
 
 @pytest.fixture
@@ -50,6 +50,17 @@ def test_subject_index_is_indexed(store, tmp_path):
 def test_init_is_idempotent(tmp_path):
     LineageStore(db_path=tmp_path / "lineage.db").close()
     LineageStore(db_path=tmp_path / "lineage.db").close()
+
+
+def test_default_db_path_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONSENTML_DB", str(tmp_path / "custom.db"))
+    assert default_db_path() == tmp_path / "custom.db"
+
+
+def test_default_db_path_home_fallback(monkeypatch):
+    monkeypatch.delenv("CONSENTML_DB", raising=False)
+    assert default_db_path().name == "lineage.db"
+    assert default_db_path().parent.name == ".consentml"
 
 
 def _record_sample_run(store, model_name="churn_v3", subject_hashes=("h1", "h2")):

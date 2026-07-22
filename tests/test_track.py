@@ -116,3 +116,10 @@ def test_track_fails_before_training_runs(tmp_path, df):
     with pytest.raises(ConsentMLError):
         train(df)
     assert calls == []  # validation happens before the expensive training call
+
+
+def test_public_api_exports():
+    import consentml
+
+    assert consentml.track is track
+    assert consentml.ConsentMLError is ConsentMLError
