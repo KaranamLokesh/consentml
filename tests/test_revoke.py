@@ -100,3 +100,10 @@ def test_report_to_dict_round_trips_through_json(db):
     data = json.loads(json.dumps(report.to_dict()))
     assert data["affected_models"][0]["model_name"] == "m"
     assert data["audit_log_entry_id"] == report.audit_log_entry_id
+
+
+def test_public_api_exports_revoke():
+    import consentml
+
+    assert consentml.revoke is revoke
+    assert consentml.AffectedModelsReport is AffectedModelsReport
