@@ -63,7 +63,12 @@ def test_default_db_path_home_fallback(monkeypatch):
     assert default_db_path().parent.name == ".consentml"
 
 
-def _record_sample_run(store, model_name="churn_v3", subject_hashes=("h1", "h2")):
+def _record_sample_run(
+    store,
+    model_name="churn_v3",
+    subject_hashes=("h1", "h2"),
+    started_at="2026-07-21T00:00:00+00:00",
+):
     return store.record_training_run(
         model_name=model_name,
         model_hash="deadbeef",
@@ -71,7 +76,7 @@ def _record_sample_run(store, model_name="churn_v3", subject_hashes=("h1", "h2")
         subject_id_col="email",
         subject_ids_hashed=True,
         subject_id_values=list(subject_hashes),
-        started_at="2026-07-21T00:00:00+00:00",
+        started_at=started_at,
         finished_at="2026-07-21T00:01:00+00:00",
     )
 
@@ -121,3 +126,39 @@ def test_audit_chain_links_and_hashes(store):
         ).encode("utf-8")
     ).hexdigest()
     assert second["entry_hash"] == expected
+
+
+def test_latest_run_for_model_picks_latest_started_at(store):
+    _record_sample_run(store, started_at="2026-07-01T00:00:00+00:00")
+    newest = _record_sample_run(store, started_at="2026-07-15T00:00:00+00:00")
+    latest = store.latest_run_for_model("churn_v3")
+    assert latest["run_id"] == newest
+
+
+def test_latest_run_for_unknown_model_is_none(store):
+    assert store.latest_run_for_model("nope") is None
+
+
+def test_record_revocation_appends_audit_entry_and_returns_id(store):
+    entry_id = store.record_revocation(
+        subject_key="abc123",
+        n_affected_runs=2,
+        recommended_actions=[{"model_name": "churn_v3", "action": "retrain"}],
+    )
+    entries = store.audit_entries()
+    assert len(entries) == 1
+    assert entries[0]["id"] == entry_id
+    assert entries[0]["event_type"] == "revocation"
+    payload = json.loads(entries[0]["payload"])
+    assert payload["subject_key"] == "abc123"
+    assert payload["n_affected_runs"] == 2
+    assert payload["recommended_actions"] == [
+        {"model_name": "churn_v3", "action": "retrain"}
+    ]
+
+
+def test_revocation_extends_hash_chain(store):
+    _record_sample_run(store)
+    store.record_revocation(subject_key="k", n_affected_runs=0, recommended_actions=[])
+    first, second = store.audit_entries()
+    assert second["prev_hash"] == first["entry_hash"]

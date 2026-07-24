@@ -16,6 +16,12 @@ from pathlib import Path
 
 GENESIS_HASH = "0" * 64
 
+_RUN_COLS = [
+    "run_id", "model_name", "model_hash", "data_source",
+    "subject_id_col", "subject_ids_hashed", "n_subjects",
+    "started_at", "finished_at",
+]
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_runs (
     run_id TEXT PRIMARY KEY,
@@ -131,12 +137,33 @@ class LineageStore:
             """,
             (subject_id_value,),
         ).fetchall()
-        cols = [
-            "run_id", "model_name", "model_hash", "data_source",
-            "subject_id_col", "subject_ids_hashed", "n_subjects",
-            "started_at", "finished_at",
-        ]
-        return [dict(zip(cols, row)) for row in rows]
+        return [dict(zip(_RUN_COLS, row)) for row in rows]
+
+    def latest_run_for_model(self, model_name) -> dict | None:
+        """The most recent training run (by started_at) for a model name."""
+        row = self._conn.execute(
+            f"SELECT {', '.join(_RUN_COLS)} FROM training_runs "
+            "WHERE model_name = ? ORDER BY started_at DESC LIMIT 1",
+            (model_name,),
+        ).fetchone()
+        return dict(zip(_RUN_COLS, row)) if row else None
+
+    def record_revocation(self, *, subject_key, n_affected_runs, recommended_actions) -> int:
+        """Append a revocation event to the audit log. Returns the entry id.
+
+        The payload carries only the hashed subject key, never a raw ID."""
+        with self._conn:
+            return self._append_audit_entry(
+                event_type="revocation",
+                payload=json.dumps(
+                    {
+                        "subject_key": subject_key,
+                        "n_affected_runs": n_affected_runs,
+                        "recommended_actions": recommended_actions,
+                    },
+                    sort_keys=True,
+                ),
+            )
 
     def audit_entries(self) -> list[dict]:
         rows = self._conn.execute(
@@ -155,8 +182,9 @@ class LineageStore:
         entry_hash = hashlib.sha256(
             (prev_hash + timestamp + event_type + payload).encode("utf-8")
         ).hexdigest()
-        self._conn.execute(
+        cursor = self._conn.execute(
             "INSERT INTO audit_log (timestamp, event_type, payload, prev_hash, entry_hash) "
             "VALUES (?, ?, ?, ?, ?)",
             (timestamp, event_type, payload, prev_hash, entry_hash),
         )
+        return cursor.lastrowid
