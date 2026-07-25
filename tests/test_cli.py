@@ -63,3 +63,50 @@ def test_cli_no_affected_models(tmp_path, capsys):
     exit_code = main(["revoke", "--subject-id", "x@x.com", "--db", str(db)])
     assert exit_code == 0
     assert "0 affected models" in capsys.readouterr().out
+
+
+import sqlite3
+
+
+def test_cli_verify_clean_exits_zero(seeded_db, capsys):
+    exit_code = main(["verify", "--db", str(seeded_db)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Audit log OK" in out
+    assert "1 entries" in out
+
+
+def test_cli_verify_tampered_exits_one(seeded_db, capsys):
+    conn = sqlite3.connect(seeded_db)
+    try:
+        with conn:
+            conn.execute("UPDATE audit_log SET payload = ? WHERE id = 1",
+                         ("not json{",))
+    finally:
+        conn.close()
+    exit_code = main(["verify", "--db", str(seeded_db)])
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "FAILED" in out
+    assert "malformed_payload" in out
+
+
+def test_cli_verify_json_output(seeded_db, capsys):
+    exit_code = main(["verify", "--db", str(seeded_db), "--json"])
+    assert exit_code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is True
+    assert data["findings"] == []
+    assert len(data["head_hash"]) == 64
+
+
+def test_cli_verify_expected_head_mismatch_exits_one(seeded_db, capsys):
+    exit_code = main(
+        ["verify", "--db", str(seeded_db), "--expected-head", "f" * 64]
+    )
+    assert exit_code == 1
+    assert "head_mismatch" in capsys.readouterr().out
+
+
+def test_cli_revoke_still_exits_zero(seeded_db, capsys):
+    assert main(["revoke", "--subject-id", "a@x.com", "--db", str(seeded_db)]) == 0
