@@ -8,6 +8,7 @@ a production database can be checked safely.
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
@@ -133,7 +134,111 @@ def _parse_payloads(entries) -> tuple[dict, list]:
 
 
 def _check_references(entries, parsed, store) -> list:
-    return []
+    """Compare training_run entries against the live tables.
+
+    Revocation entries are deliberately not cross-checked: their
+    n_affected_runs was point-in-time and legitimately differs once later
+    runs are recorded.
+    """
+    findings = []
+    logged_run_ids = set()
+    for entry in entries:
+        if entry["event_type"] != "training_run":
+            continue
+        payload = parsed.get(entry["id"])
+        if payload is None:  # already reported as malformed
+            continue
+        run_id = payload["run_id"]
+
+        # run_id came straight out of parsed JSON, so it can be any JSON
+        # type -- e.g. a list or dict -- not just the string _append_audit_
+        # entry always wrote. Those are unhashable (breaks the set below)
+        # and unbindable as a SQLite parameter (breaks the lookups below),
+        # so reject them here instead of letting either raise.
+        try:
+            hash(run_id)
+        except TypeError:
+            findings.append(
+                VerificationFinding(
+                    entry_id=entry["id"],
+                    code="malformed_payload",
+                    detail=(
+                        f"entry {entry['id']} run_id is not a valid reference"
+                    ),
+                )
+            )
+            continue
+        logged_run_ids.add(run_id)
+
+        try:
+            run = store.run_by_id(run_id)
+        except (sqlite3.InterfaceError, OverflowError):
+            # InterfaceError: a type sqlite3 can't bind at all (shouldn't
+            # reach here given the hash() check above, but defense in
+            # depth). OverflowError: a JSON integer wider than SQLite's
+            # 64-bit INTEGER, which hash()/bindability alone don't rule out.
+            findings.append(
+                VerificationFinding(
+                    entry_id=entry["id"],
+                    code="malformed_payload",
+                    detail=(
+                        f"entry {entry['id']} run_id is not a valid reference"
+                    ),
+                )
+            )
+            continue
+        if run is None:
+            findings.append(
+                VerificationFinding(
+                    entry_id=entry["id"],
+                    code="missing_run",
+                    detail=(
+                        f"run {run_id} from entry {entry['id']} is absent "
+                        "from training_runs"
+                    ),
+                )
+            )
+            continue
+
+        actual = store.subject_count_for_run(run_id)
+        if actual != payload["n_subjects"]:
+            findings.append(
+                VerificationFinding(
+                    entry_id=entry["id"],
+                    code="subject_count_mismatch",
+                    detail=(
+                        f"run {run_id}: audit log records {payload['n_subjects']} "
+                        f"subjects, subject_index holds {actual}"
+                    ),
+                )
+            )
+        if run["model_hash"] != payload["model_hash"]:
+            findings.append(
+                VerificationFinding(
+                    entry_id=entry["id"],
+                    code="run_modified",
+                    detail=(
+                        f"run {run_id}: model_hash in training_runs differs "
+                        "from the logged value"
+                    ),
+                )
+            )
+
+    # sorted() on raw run_id values would raise TypeError if training_runs
+    # ever holds a mix of types (e.g. a BLOB run_id alongside normal TEXT
+    # ones) -- sort by string representation so ordering stays deterministic
+    # without assuming every run_id is comparable to every other.
+    for run_id in sorted(store.all_run_ids() - logged_run_ids, key=str):
+        findings.append(
+            VerificationFinding(
+                entry_id=None,
+                code="unlogged_run",
+                detail=(
+                    f"run {run_id} exists in training_runs with no audit entry"
+                ),
+            )
+        )
+    return findings
 
 
 def verify_audit_log(*, db_path=None) -> VerificationReport:

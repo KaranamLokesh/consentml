@@ -176,3 +176,158 @@ def test_oversized_integer_literal_payload_is_detected_without_raising(db):
     assert "malformed_payload" in _codes(report)
     assert report.ok is False
     assert report.ok is False
+
+
+def test_deleted_subject_row_is_detected(db):
+    run_ids = _seed(db, n_runs=2)
+    _sql(db, "DELETE FROM subject_index WHERE run_id = ? AND subject_id_hash = ?",
+         (run_ids[0], "s0a"))
+    report = verify_audit_log(db_path=db)
+    assert report.ok is False
+    findings = [f for f in report.findings if f.code == "subject_count_mismatch"]
+    assert len(findings) == 1
+    assert "2" in findings[0].detail and "1" in findings[0].detail
+
+
+def test_added_subject_row_is_detected(db):
+    run_ids = _seed(db, n_runs=1)
+    _sql(db, "INSERT INTO subject_index VALUES (?, ?)", (run_ids[0], "smuggled"))
+    report = verify_audit_log(db_path=db)
+    assert "subject_count_mismatch" in _codes(report)
+
+
+def test_deleted_run_is_detected(db):
+    run_ids = _seed(db, n_runs=2)
+    _sql(db, "DELETE FROM training_runs WHERE run_id = ?", (run_ids[0],))
+    report = verify_audit_log(db_path=db)
+    findings = [f for f in report.findings if f.code == "missing_run"]
+    assert len(findings) == 1
+    assert run_ids[0] in findings[0].detail
+
+
+def test_modified_model_hash_is_detected(db):
+    run_ids = _seed(db, n_runs=1)
+    _sql(db, "UPDATE training_runs SET model_hash = ? WHERE run_id = ?",
+         ("forged", run_ids[0]))
+    report = verify_audit_log(db_path=db)
+    assert "run_modified" in _codes(report)
+
+
+def test_unlogged_run_is_detected(db):
+    _seed(db, n_runs=1)
+    _sql(
+        db,
+        "INSERT INTO training_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("smuggled-run", "shadow", "h", "src", "email", 1, 0,
+         "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
+    )
+    report = verify_audit_log(db_path=db)
+    findings = [f for f in report.findings if f.code == "unlogged_run"]
+    assert len(findings) == 1
+    assert findings[0].entry_id is None
+    assert "smuggled-run" in findings[0].detail
+
+
+def test_zero_subject_run_is_not_a_mismatch(db):
+    store = LineageStore(db_path=db)
+    try:
+        store.record_training_run(
+            model_name="empty",
+            model_hash="h",
+            data_source="src",
+            subject_id_col="email",
+            subject_ids_hashed=True,
+            subject_id_values=[],
+            started_at="2026-07-01T00:00:00+00:00",
+            finished_at="2026-07-01T00:01:00+00:00",
+        )
+    finally:
+        store.close()
+    report = verify_audit_log(db_path=db)
+    assert report.ok is True
+
+
+def test_revocation_entries_are_not_cross_checked(db):
+    _seed(db, n_runs=1)
+    store = LineageStore(db_path=db)
+    try:
+        store.record_revocation(
+            subject_key="k", n_affected_runs=99, recommended_actions=[]
+        )
+    finally:
+        store.close()
+    report = verify_audit_log(db_path=db)
+    assert report.ok is True
+
+
+def test_malformed_training_payload_skips_cross_check(db):
+    _seed(db, n_runs=1)
+    _sql(db, "UPDATE audit_log SET payload = ? WHERE id = 1", ("not json{",))
+    report = verify_audit_log(db_path=db)
+    codes = _codes(report)
+    assert "malformed_payload" in codes
+    assert "missing_run" not in codes
+    assert "unlogged_run" in codes  # the run is now effectively unlogged
+
+
+# -- Adversarial: a training_run payload is only guaranteed to be a dict
+# with the required keys present (see _parse_payloads); the values
+# themselves can be any JSON type. run_id in particular flows into a set
+# and into SQLite parameter binding, both of which reject certain types.
+
+
+def test_list_run_id_in_payload_does_not_raise(db):
+    _seed(db, n_runs=1)
+    _sql(
+        db,
+        "UPDATE audit_log SET payload = ? WHERE id = 1",
+        (json.dumps({"run_id": [1, 2], "model_name": "m",
+                     "model_hash": "h", "n_subjects": 1}),),
+    )
+    report = verify_audit_log(db_path=db)
+    assert "malformed_payload" in _codes(report)
+    assert report.ok is False
+
+
+def test_dict_run_id_in_payload_does_not_raise(db):
+    _seed(db, n_runs=1)
+    _sql(
+        db,
+        "UPDATE audit_log SET payload = ? WHERE id = 1",
+        (json.dumps({"run_id": {"a": 1}, "model_name": "m",
+                     "model_hash": "h", "n_subjects": 1}),),
+    )
+    report = verify_audit_log(db_path=db)
+    assert "malformed_payload" in _codes(report)
+    assert report.ok is False
+
+
+def test_oversized_integer_run_id_does_not_raise(db):
+    """A run_id past SQLite's 64-bit INTEGER range: valid JSON, hashable,
+    but sqlite3 raises OverflowError when binding it as a parameter."""
+    _seed(db, n_runs=1)
+    _sql(
+        db,
+        "UPDATE audit_log SET payload = ? WHERE id = 1",
+        (json.dumps({"run_id": 10**30, "model_name": "m",
+                     "model_hash": "h", "n_subjects": 1}),),
+    )
+    report = verify_audit_log(db_path=db)
+    assert "malformed_payload" in _codes(report)
+    assert report.ok is False
+
+
+def test_mixed_type_unlogged_run_ids_do_not_raise(db):
+    """training_runs.run_id has TEXT affinity but SQLite still allows a
+    BLOB to be stored there directly. Mixing that with the normal TEXT
+    run_ids of other unlogged rows must not crash sorted()."""
+    _seed(db, n_runs=1)
+    _sql(
+        db,
+        "INSERT INTO training_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (b"\x00\x01blob-run-id", "shadow", "h", "src", "email", 1, 0,
+         "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
+    )
+    report = verify_audit_log(db_path=db)
+    findings = [f for f in report.findings if f.code == "unlogged_run"]
+    assert len(findings) == 1
