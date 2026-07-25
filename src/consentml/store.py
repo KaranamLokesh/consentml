@@ -148,6 +148,25 @@ class LineageStore:
         ).fetchone()
         return dict(zip(_RUN_COLS, row)) if row else None
 
+    def run_by_id(self, run_id) -> dict | None:
+        """The training run with this id, or None if it is absent."""
+        row = self._conn.execute(
+            f"SELECT {', '.join(_RUN_COLS)} FROM training_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return dict(zip(_RUN_COLS, row)) if row else None
+
+    def subject_count_for_run(self, run_id) -> int:
+        """How many subject_index rows currently exist for this run."""
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM subject_index WHERE run_id = ?", (run_id,)
+        ).fetchone()[0]
+
+    def all_run_ids(self) -> set:
+        """Every run id present in training_runs."""
+        rows = self._conn.execute("SELECT run_id FROM training_runs").fetchall()
+        return {row[0] for row in rows}
+
     def record_revocation(self, *, subject_key, n_affected_runs, recommended_actions) -> int:
         """Append a revocation event to the audit log. Returns the entry id.
 
