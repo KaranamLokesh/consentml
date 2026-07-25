@@ -47,10 +47,10 @@ class VerificationReport:
 def _recompute(entry) -> str:
     return hashlib.sha256(
         (
-            entry["prev_hash"]
-            + entry["timestamp"]
-            + entry["event_type"]
-            + entry["payload"]
+            str(entry["prev_hash"])
+            + str(entry["timestamp"])
+            + str(entry["event_type"])
+            + str(entry["payload"])
         ).encode("utf-8")
     ).hexdigest()
 
@@ -101,6 +101,15 @@ def _parse_payloads(entries) -> tuple[dict, list]:
                 )
             )
             continue
+        if not isinstance(payload, dict):
+            findings.append(
+                VerificationFinding(
+                    entry_id=entry["id"],
+                    code="malformed_payload",
+                    detail=f"entry {entry['id']} payload is not a JSON object",
+                )
+            )
+            continue
         required = _REQUIRED_KEYS.get(entry["event_type"], set())
         missing = required - set(payload)
         if missing:
@@ -131,6 +140,7 @@ def verify_audit_log(*, db_path=None) -> VerificationReport:
         parsed, findings = _parse_payloads(entries)
         findings += _check_chain(entries)
         findings += _check_references(entries, parsed, store)
+        findings.sort(key=lambda f: (f.entry_id is None, f.entry_id or 0))
         return VerificationReport(
             ok=not findings,
             n_entries=len(entries),

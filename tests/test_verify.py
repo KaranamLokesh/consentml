@@ -130,5 +130,19 @@ def test_report_to_dict_round_trips_through_json(db):
     data = json.loads(json.dumps(report.to_dict()))
     assert data["ok"] is False
     assert data["n_entries"] == 1
-    assert data["findings"][0]["code"] == "malformed_payload"
+    assert any(f["code"] == "malformed_payload" for f in data["findings"])
     assert data["generated_at"] == report.generated_at
+
+
+def test_non_dict_payload_is_detected_without_raising(db):
+    _seed(db, n_runs=1)
+    _sql(db, "UPDATE audit_log SET payload = ? WHERE id = 1", ("42",))
+    report = verify_audit_log(db_path=db)
+    assert "malformed_payload" in _codes(report)
+
+
+def test_blob_in_hashed_column_is_detected_without_raising(db):
+    _seed(db, n_runs=1)
+    _sql(db, "UPDATE audit_log SET timestamp = ? WHERE id = 1", (b"blob",))
+    report = verify_audit_log(db_path=db)
+    assert "entry_hash_mismatch" in _codes(report)
