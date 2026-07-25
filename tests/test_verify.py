@@ -65,6 +65,15 @@ def test_empty_log_verifies(db):
     assert report.n_entries == 0
 
 
+def test_missing_database_is_reported_not_created(db):
+    assert not db.exists()
+    report = verify_audit_log(db_path=db)
+    assert report.ok is False
+    assert report.n_entries == 0
+    assert _codes(report) == ["missing_database"]
+    assert not db.exists()
+
+
 def test_edited_payload_is_detected_without_cascade(db):
     _seed(db, n_runs=5)
     _sql(db, "UPDATE audit_log SET payload = ? WHERE id = 3", ('{"run_id": "x"}',))

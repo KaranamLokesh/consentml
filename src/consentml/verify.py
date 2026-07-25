@@ -1,9 +1,10 @@
 """Audit-log verification: is the recorded history intact?
 
-verify_audit_log() is strictly read-only. It never repairs, and it records no
-audit event of its own -- a self-recorded "I verified myself" entry would carry
-no more trust than the log containing it, and staying read-only means a copy of
-a production database can be checked safely.
+verify_audit_log() is strictly read-only. It never repairs, records no audit
+event of its own -- a self-recorded "I verified myself" entry would carry no
+more trust than the log containing it -- and never creates or modifies the
+database, including never provisioning one that doesn't exist yet. Staying
+read-only means a copy of a production database can be checked safely.
 """
 
 import hashlib
@@ -11,8 +12,9 @@ import json
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
-from consentml.store import GENESIS_HASH, LineageStore
+from consentml.store import GENESIS_HASH, LineageStore, default_db_path
 
 _REQUIRED_KEYS = {
     "training_run": {"run_id", "model_name", "model_hash", "n_subjects"},
@@ -259,6 +261,27 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
     validly-chained forged entries past the anchor, and no anchor taken
     before those entries can detect that.
     """
+    db = Path(db_path) if db_path is not None else default_db_path()
+    if not db.exists():
+        # LineageStore.__init__ would create the parent directories and the
+        # database file itself -- fine for @track/revoke, which legitimately
+        # provision a database on first use, but wrong here: verification
+        # never legitimately creates one, and a typoed --db path must not be
+        # able to silently report a clean bill of health for a database that
+        # was never checked.
+        return VerificationReport(
+            ok=False,
+            n_entries=0,
+            head_hash=GENESIS_HASH,
+            findings=[
+                VerificationFinding(
+                    entry_id=None,
+                    code="missing_database",
+                    detail=f"no lineage database at {db}",
+                )
+            ],
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
     store = LineageStore(db_path=db_path)
     try:
         entries = store.audit_entries()

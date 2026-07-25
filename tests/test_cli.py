@@ -110,3 +110,12 @@ def test_cli_verify_expected_head_mismatch_exits_one(seeded_db, capsys):
 
 def test_cli_revoke_still_exits_zero(seeded_db, capsys):
     assert main(["revoke", "--subject-id", "a@x.com", "--db", str(seeded_db)]) == 0
+
+
+def test_cli_verify_missing_db_exits_nonzero(tmp_path, capsys):
+    missing = tmp_path / "does-not-exist.db"
+    exit_code = main(["verify", "--db", str(missing)])
+    assert exit_code != 0
+    out = capsys.readouterr().out
+    assert "no lineage database" in out
+    assert not missing.exists()
