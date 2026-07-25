@@ -84,20 +84,23 @@ def main(argv=None) -> int:
             report = verify_audit_log(
                 db_path=args.db, expected_head=args.expected_head
             )
-            if args.as_json:
-                print(json.dumps(report.to_dict(), indent=2))
-            else:
-                _print_verify_summary(report)
-            return 0 if report.ok else 1
-
-        report = revoke(
-            subject_id=args.subject_id, db_path=args.db, dry_run=args.dry_run
-        )
-        if args.as_json:
-            print(json.dumps(report.to_dict(), indent=2))
         else:
-            _print_summary(report)
-        return 0
+            report = revoke(
+                subject_id=args.subject_id, db_path=args.db, dry_run=args.dry_run
+            )
     except (sqlite3.Error, OSError) as e:
         print(f"Error: could not open database at {args.db!r}: {e}", file=sys.stderr)
         return 2
+
+    if args.command == "verify":
+        if args.as_json:
+            print(json.dumps(report.to_dict(), indent=2))
+        else:
+            _print_verify_summary(report)
+        return 0 if report.ok else 1
+
+    if args.as_json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        _print_summary(report)
+    return 0

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import pytest
 
@@ -63,9 +64,6 @@ def test_cli_no_affected_models(tmp_path, capsys):
     exit_code = main(["revoke", "--subject-id", "x@x.com", "--db", str(db)])
     assert exit_code == 0
     assert "0 affected models" in capsys.readouterr().out
-
-
-import sqlite3
 
 
 def test_cli_verify_clean_exits_zero(seeded_db, capsys):
