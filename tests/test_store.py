@@ -162,3 +162,34 @@ def test_revocation_extends_hash_chain(store):
     store.record_revocation(subject_key="k", n_affected_runs=0, recommended_actions=[])
     first, second = store.audit_entries()
     assert second["prev_hash"] == first["entry_hash"]
+
+
+def test_run_by_id_returns_the_run(store):
+    run_id = _record_sample_run(store)
+    run = store.run_by_id(run_id)
+    assert run["run_id"] == run_id
+    assert run["model_name"] == "churn_v3"
+    assert run["n_subjects"] == 2
+
+
+def test_run_by_id_unknown_is_none(store):
+    assert store.run_by_id("nope") is None
+
+
+def test_subject_count_for_run(store):
+    run_id = _record_sample_run(store, subject_hashes=("h1", "h2", "h3"))
+    assert store.subject_count_for_run(run_id) == 3
+
+
+def test_subject_count_for_unknown_run_is_zero(store):
+    assert store.subject_count_for_run("nope") == 0
+
+
+def test_all_run_ids(store):
+    a = _record_sample_run(store, model_name="a")
+    b = _record_sample_run(store, model_name="b")
+    assert store.all_run_ids() == {a, b}
+
+
+def test_all_run_ids_empty(store):
+    assert store.all_run_ids() == set()

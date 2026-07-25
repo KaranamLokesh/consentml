@@ -93,10 +93,35 @@ construction, not a gap in the implementation, and the README must not
 overclaim past it.
 
 The mitigation is to anchor the head hash outside the database. The report
-therefore exposes `head_hash`, and `verify_audit_log(expected_head=...)`
-compares against a previously anchored value, reporting `head_mismatch` when
-they diverge. Operators record `head_hash` in CI logs or a separate system;
-ConsentML deliberately does not build the anchor store itself.
+exposes `head_hash`, and `verify_audit_log(expected_head=...)` checks a
+previously anchored value. Operators record `head_hash` in CI logs or a separate
+system; ConsentML deliberately does not build the anchor store itself.
+
+**The check is membership, not equality.** An audit log legitimately grows, so
+comparing the anchor to the *current* head would report `head_mismatch` the
+moment one honest entry was appended — firing on essentially every run in steady
+state, and training operators to ignore the one control that catches a rewrite.
+Instead the anchor is looked up across every `entry_hash` in the chain (plus
+`GENESIS_HASH`, for an anchor taken before any run was recorded):
+
+- anchor **found** → the log is a legitimate extension of anchored history → no
+  finding
+- anchor **absent** → history was rewritten or truncated → `head_mismatch`
+
+This is sound because an entry's hash transitively covers every entry before it:
+altering anything earlier changes the anchor's own hash, so it stops appearing.
+Verified empirically — rewriting entry 1 and recomputing the chain forward leaves
+the log internally consistent yet makes the anchor unreachable.
+
+**What anchoring does not prove.** It establishes integrity only *up to the
+anchor point*. An attacker who appends validly-chained forged entries after the
+anchor is undetectable by an anchor taken before them. Frequent re-anchoring
+narrows that window; nothing inside the database closes it.
+
+The lookup uses a linear `==` scan rather than a set, deliberately. Set
+membership hashes the operand, so an unhashable `expected_head` raised
+`TypeError` — a crash in the one code path whose contract is to never crash.
+Equality comparison never raises for any pair of types.
 
 ### 3. Referential cross-check
 
@@ -111,20 +136,36 @@ live tables. Separately, detect training runs that were never logged at all.
 | `malformed_payload` | Payload is not valid JSON, or lacks expected keys |
 | `missing_run` | Payload `run_id` has no row in `training_runs` |
 | `subject_count_mismatch` | `COUNT(*)` of `subject_index` for the run ≠ payload `n_subjects` |
-| `run_modified` | `training_runs.model_hash` ≠ payload `model_hash` |
+| `run_modified` | `training_runs.model_hash` or `n_subjects` ≠ the logged value |
 | `unlogged_run` | A `training_runs` row has no corresponding audit entry (`entry_id` is `None`) |
-| `head_mismatch` | `expected_head` was supplied and differs from the actual head (`entry_id` is `None`) |
+| `head_mismatch` | `expected_head` was supplied and appears nowhere in the chain (`entry_id` is `None`) |
 
 `subject_count_mismatch` is the check that closes the deleted-subject attack.
 `unlogged_run` is its dual: a model trained without any audit record at all.
 
+The subject count is compared against the **payload's** `n_subjects`, which the
+hash chain protects — never against the `training_runs.n_subjects` column, which
+an attacker can edit. Deleting a `subject_index` row *and* editing
+`training_runs.n_subjects` to match leaves the tables internally consistent, so
+only the audit payload reveals the deletion. That combined attack carries a
+dedicated regression test, so a future "optimization" that reads the column
+instead of counting rows fails loudly.
+
 `malformed_payload` must be handled explicitly — a tampered payload can fail
 `json.loads`, and an unhandled exception during verification would be a poor
-failure mode for a tool whose entire job is to survive hostile input.
+failure mode for a tool whose entire job is to survive hostile input. In
+practice this proved to be the hardest part of the module: implementation
+surfaced three separate crash classes (JSON parsing to a non-dict, BLOB columns
+raising `UnicodeDecodeError`, and deeply nested JSON raising `RecursionError`),
+plus three more in the cross-check path (unhashable `run_id`, integers too wide
+for SQLite to bind, and mixed `str`/`bytes` run ids breaking `sorted`). The
+settled approach is to treat *any* `json.loads` failure as `malformed_payload`
+rather than enumerate exception types, and to guard each attacker-reachable
+comparison individually.
 
 ### Store additions
 
-Two small query methods on `LineageStore`:
+Three small query methods on `LineageStore`:
 
 - `run_by_id(run_id) -> dict | None`
 - `subject_count_for_run(run_id) -> int`
@@ -167,13 +208,18 @@ Target ~14 tests, holding the existing 100% coverage bar:
 - non-JSON payload → `malformed_payload` (no exception escapes)
 - deleted `subject_index` row → `subject_count_mismatch`
 - deleted `training_runs` row → `missing_run`
-- edited `model_hash` → `run_modified`
+- edited `model_hash` → `run_modified`; edited `n_subjects` column → `run_modified`
+- deleted `subject_index` row **plus** a matching `training_runs.n_subjects` edit
+  → still `subject_count_mismatch`
 - directly-inserted run → `unlogged_run`
 - **one edit yields one finding** — the no-cascade guarantee, tested in both the
   naive and rehashed forms
 - `head_hash` equals the last entry's hash; genesis for an empty log
 - wholesale rewrite verifies clean *without* an anchor but trips `head_mismatch`
   *with* one
+- legitimate growth after an anchor is **not** a mismatch
+- a rewrite of history *before* the anchor point still is one
+- an unhashable or wrong-typed `expected_head` reports rather than raises
 - `to_dict()` round-trips through JSON
 - CLI: exit 0 clean, exit 1 tampered, `--json` output shape, `--expected-head`
 
