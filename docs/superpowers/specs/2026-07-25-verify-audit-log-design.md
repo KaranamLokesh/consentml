@@ -54,8 +54,11 @@ class VerificationReport:
 ```
 
 ```python
-def verify_audit_log(*, db_path=None) -> VerificationReport
+def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport
 ```
+
+`VerificationReport` also carries `head_hash: str` — the last entry's hash, or
+`GENESIS_HASH` for an empty log. See the anchoring limitation below.
 
 ## Checks
 
@@ -70,9 +73,30 @@ The first entry's `prev_hash` must equal `GENESIS_HASH`. Each subsequent
 `prev_hash` must equal the previous row's **stored** `entry_hash`.
 
 Comparing against the previous *stored* hash rather than a running recomputed
-hash is what prevents cascading findings. A single edited row yields exactly two
-findings — a bad hash at entry *k* and a broken link at entry *k+1* — instead of
-marking the entire tail invalid.
+hash is what prevents cascading findings. Working the two cases through:
+
+- A naive tamperer edits a payload and leaves `entry_hash` alone → **one**
+  `entry_hash_mismatch` at that entry. Entry *k+1*'s `prev_hash` still matches
+  the unchanged stored hash, so no link breaks.
+- A sophisticated tamperer edits the payload *and* recomputes `entry_hash` →
+  that entry passes its own hash check, but entry *k+1*'s `prev_hash` no longer
+  matches → **one** `broken_link` at *k+1*.
+
+Either way a single edit yields a single finding, never a corrupted tail.
+
+## Limitation: the chain needs an external anchor
+
+A hash chain detects *partial* tampering. It cannot detect an attacker who
+rewrites the log from genesis and recomputes every hash — that forgery verifies
+clean, as does deleting the log and starting fresh. This is inherent to the
+construction, not a gap in the implementation, and the README must not
+overclaim past it.
+
+The mitigation is to anchor the head hash outside the database. The report
+therefore exposes `head_hash`, and `verify_audit_log(expected_head=...)`
+compares against a previously anchored value, reporting `head_mismatch` when
+they diverge. Operators record `head_hash` in CI logs or a separate system;
+ConsentML deliberately does not build the anchor store itself.
 
 ### 3. Referential cross-check
 
@@ -89,6 +113,7 @@ live tables. Separately, detect training runs that were never logged at all.
 | `subject_count_mismatch` | `COUNT(*)` of `subject_index` for the run ≠ payload `n_subjects` |
 | `run_modified` | `training_runs.model_hash` ≠ payload `model_hash` |
 | `unlogged_run` | A `training_runs` row has no corresponding audit entry (`entry_id` is `None`) |
+| `head_mismatch` | `expected_head` was supplied and differs from the actual head (`entry_id` is `None`) |
 
 `subject_count_mismatch` is the check that closes the deleted-subject attack.
 `unlogged_run` is its dual: a model trained without any audit record at all.
@@ -144,9 +169,13 @@ Target ~14 tests, holding the existing 100% coverage bar:
 - deleted `training_runs` row → `missing_run`
 - edited `model_hash` → `run_modified`
 - directly-inserted run → `unlogged_run`
-- **one edit yields exactly two findings** — the no-cascade guarantee
+- **one edit yields one finding** — the no-cascade guarantee, tested in both the
+  naive and rehashed forms
+- `head_hash` equals the last entry's hash; genesis for an empty log
+- wholesale rewrite verifies clean *without* an anchor but trips `head_mismatch`
+  *with* one
 - `to_dict()` round-trips through JSON
-- CLI: exit 0 clean, exit 1 tampered, `--json` output shape
+- CLI: exit 0 clean, exit 1 tampered, `--json` output shape, `--expected-head`
 
 Tests tamper by opening the SQLite file directly with `sqlite3` and issuing
 `UPDATE`/`DELETE`, which is exactly the threat model.
