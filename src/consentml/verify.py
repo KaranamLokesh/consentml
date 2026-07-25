@@ -92,10 +92,11 @@ def _parse_payloads(entries) -> tuple[dict, list]:
     for entry in entries:
         try:
             payload = json.loads(entry["payload"])
-        except ValueError:
-            # Covers both json.JSONDecodeError (bad JSON text) and
-            # UnicodeDecodeError (a BLOB that isn't valid UTF-8) -- both
-            # subclass ValueError, and either means the payload is malformed.
+        except Exception:
+            # Any json.loads failure means the payload is malformed: bad JSON
+            # text, a BLOB that isn't valid UTF-8, or nesting deep enough to
+            # blow the parser's recursion limit. The try wraps exactly this
+            # one call, so a broad except can't mask an unrelated bug.
             findings.append(
                 VerificationFinding(
                     entry_id=entry["id"],

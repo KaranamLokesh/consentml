@@ -154,3 +154,25 @@ def test_blob_payload_is_detected_without_raising(db):
     report = verify_audit_log(db_path=db)
     assert "malformed_payload" in _codes(report)
     assert report.ok is False
+
+
+def test_deeply_nested_payload_is_detected_without_raising(db):
+    _seed(db, n_runs=1)
+    nested = "[" * 10000 + "1" + "]" * 10000
+    _sql(db, "UPDATE audit_log SET payload = ? WHERE id = 1", (nested,))
+    report = verify_audit_log(db_path=db)
+    assert "malformed_payload" in _codes(report)
+
+
+def test_oversized_integer_literal_payload_is_detected_without_raising(db):
+    """A bare integer literal thousands of digits long: CPython's int/str
+    conversion guard (sys.get_int_max_str_digits) makes json.loads raise
+    ValueError here for a reason distinct from bad JSON syntax, bad UTF-8,
+    or recursion depth -- a fourth failure mode for the same broad except."""
+    _seed(db, n_runs=1)
+    huge_int = "1" + "0" * 5000
+    _sql(db, "UPDATE audit_log SET payload = ? WHERE id = 1", (huge_int,))
+    report = verify_audit_log(db_path=db)
+    assert "malformed_payload" in _codes(report)
+    assert report.ok is False
+    assert report.ok is False
