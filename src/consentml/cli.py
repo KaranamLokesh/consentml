@@ -1,4 +1,11 @@
-"""Command-line interface: consentml revoke --subject-id <id>."""
+"""Command-line interface.
+
+    consentml revoke --subject-id <id>
+    consentml verify [--expected-head <hash>]
+
+Exit codes: 0 clean, 1 the database was read and problems were found
+(including no database at the given path), 2 the database could not be read.
+"""
 
 import argparse
 import json
