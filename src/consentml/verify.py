@@ -92,7 +92,10 @@ def _parse_payloads(entries) -> tuple[dict, list]:
     for entry in entries:
         try:
             payload = json.loads(entry["payload"])
-        except json.JSONDecodeError:
+        except ValueError:
+            # Covers both json.JSONDecodeError (bad JSON text) and
+            # UnicodeDecodeError (a BLOB that isn't valid UTF-8) -- both
+            # subclass ValueError, and either means the payload is malformed.
             findings.append(
                 VerificationFinding(
                     entry_id=entry["id"],

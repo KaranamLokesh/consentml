@@ -146,3 +146,11 @@ def test_blob_in_hashed_column_is_detected_without_raising(db):
     _sql(db, "UPDATE audit_log SET timestamp = ? WHERE id = 1", (b"blob",))
     report = verify_audit_log(db_path=db)
     assert "entry_hash_mismatch" in _codes(report)
+
+
+def test_blob_payload_is_detected_without_raising(db):
+    _seed(db, n_runs=1)
+    _sql(db, "UPDATE audit_log SET payload = ? WHERE id = 1", (b"\x80\x81\x82",))
+    report = verify_audit_log(db_path=db)
+    assert "malformed_payload" in _codes(report)
+    assert report.ok is False
