@@ -389,6 +389,26 @@ def test_matching_expected_head_verifies(db):
     assert report.ok is True
 
 
+def test_empty_log_anchored_against_genesis_verifies(db):
+    # Fresh-install case: the operator anchors the genesis head before any
+    # training runs are recorded, and that anchor must still validate later.
+    LineageStore(db_path=db).close()
+    report = verify_audit_log(db_path=db, expected_head=GENESIS_HASH)
+    assert report.ok is True
+    assert report.findings == []
+
+
+def test_empty_log_anchored_against_non_genesis_is_mismatch(db):
+    # Complementary case: an attacker deletes the entire log, including all
+    # its entries, after an anchor was taken. The now-empty log's head is
+    # GENESIS_HASH, which must not match a previously anchored non-genesis
+    # value.
+    LineageStore(db_path=db).close()
+    report = verify_audit_log(db_path=db, expected_head="f" * 64)
+    assert report.ok is False
+    assert "head_mismatch" in _codes(report)
+
+
 def test_wholesale_rewrite_is_caught_by_the_anchor(db):
     _seed(db, n_runs=2)
     anchored = verify_audit_log(db_path=db).head_hash
