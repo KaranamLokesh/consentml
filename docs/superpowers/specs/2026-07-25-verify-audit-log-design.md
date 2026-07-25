@@ -111,20 +111,36 @@ live tables. Separately, detect training runs that were never logged at all.
 | `malformed_payload` | Payload is not valid JSON, or lacks expected keys |
 | `missing_run` | Payload `run_id` has no row in `training_runs` |
 | `subject_count_mismatch` | `COUNT(*)` of `subject_index` for the run ≠ payload `n_subjects` |
-| `run_modified` | `training_runs.model_hash` ≠ payload `model_hash` |
+| `run_modified` | `training_runs.model_hash` or `n_subjects` ≠ the logged value |
 | `unlogged_run` | A `training_runs` row has no corresponding audit entry (`entry_id` is `None`) |
 | `head_mismatch` | `expected_head` was supplied and differs from the actual head (`entry_id` is `None`) |
 
 `subject_count_mismatch` is the check that closes the deleted-subject attack.
 `unlogged_run` is its dual: a model trained without any audit record at all.
 
+The subject count is compared against the **payload's** `n_subjects`, which the
+hash chain protects — never against the `training_runs.n_subjects` column, which
+an attacker can edit. Deleting a `subject_index` row *and* editing
+`training_runs.n_subjects` to match leaves the tables internally consistent, so
+only the audit payload reveals the deletion. That combined attack carries a
+dedicated regression test, so a future "optimization" that reads the column
+instead of counting rows fails loudly.
+
 `malformed_payload` must be handled explicitly — a tampered payload can fail
 `json.loads`, and an unhandled exception during verification would be a poor
-failure mode for a tool whose entire job is to survive hostile input.
+failure mode for a tool whose entire job is to survive hostile input. In
+practice this proved to be the hardest part of the module: implementation
+surfaced three separate crash classes (JSON parsing to a non-dict, BLOB columns
+raising `UnicodeDecodeError`, and deeply nested JSON raising `RecursionError`),
+plus three more in the cross-check path (unhashable `run_id`, integers too wide
+for SQLite to bind, and mixed `str`/`bytes` run ids breaking `sorted`). The
+settled approach is to treat *any* `json.loads` failure as `malformed_payload`
+rather than enumerate exception types, and to guard each attacker-reachable
+comparison individually.
 
 ### Store additions
 
-Two small query methods on `LineageStore`:
+Three small query methods on `LineageStore`:
 
 - `run_by_id(run_id) -> dict | None`
 - `subject_count_for_run(run_id) -> int`
@@ -167,7 +183,9 @@ Target ~14 tests, holding the existing 100% coverage bar:
 - non-JSON payload → `malformed_payload` (no exception escapes)
 - deleted `subject_index` row → `subject_count_mismatch`
 - deleted `training_runs` row → `missing_run`
-- edited `model_hash` → `run_modified`
+- edited `model_hash` → `run_modified`; edited `n_subjects` column → `run_modified`
+- deleted `subject_index` row **plus** a matching `training_runs.n_subjects` edit
+  → still `subject_count_mismatch`
 - directly-inserted run → `unlogged_run`
 - **one edit yields one finding** — the no-cascade guarantee, tested in both the
   naive and rehashed forms
