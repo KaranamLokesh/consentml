@@ -389,6 +389,54 @@ def test_matching_expected_head_verifies(db):
     assert report.ok is True
 
 
+def test_legitimate_growth_after_anchor_is_not_a_mismatch(db):
+    _seed(db, n_runs=1)
+    anchored = verify_audit_log(db_path=db).head_hash
+    _seed(db, n_runs=1)  # more legitimate activity after the anchor
+    report = verify_audit_log(db_path=db, expected_head=anchored)
+    assert "head_mismatch" not in _codes(report)
+
+
+def test_rewrite_before_the_anchor_point_is_still_caught(db):
+    """The security argument for membership-checking the anchor: a rewrite
+    of an entry *earlier* than the anchor, with the whole chain recomputed
+    forward to stay internally consistent (as a real attacker would), must
+    still make the anchored hash disappear from the chain -- because that
+    hash was computed from the now-changed earlier entry."""
+    _seed(db, n_runs=3)
+    anchored = verify_audit_log(db_path=db).head_hash
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT id, timestamp, event_type, payload FROM audit_log ORDER BY id"
+        ).fetchall()
+        prev = GENESIS_HASH
+        for entry_id, timestamp, event_type, payload in rows:
+            if entry_id == 1:
+                payload = payload.replace("hash_0", "forged_hash")
+            new_hash = hashlib.sha256(
+                (prev + timestamp + event_type + payload).encode("utf-8")
+            ).hexdigest()
+            conn.execute(
+                "UPDATE audit_log SET payload = ?, prev_hash = ?, entry_hash = ? "
+                "WHERE id = ?",
+                (payload, prev, new_hash, entry_id),
+            )
+            prev = new_hash
+        conn.commit()
+    finally:
+        conn.close()
+
+    rewritten = verify_audit_log(db_path=db)
+    assert "entry_hash_mismatch" not in _codes(rewritten)
+    assert "broken_link" not in _codes(rewritten)
+
+    anchored_report = verify_audit_log(db_path=db, expected_head=anchored)
+    assert anchored_report.ok is False
+    assert "head_mismatch" in _codes(anchored_report)
+
+
 def test_empty_log_anchored_against_genesis_verifies(db):
     # Fresh-install case: the operator anchors the genesis head before any
     # training runs are recorded, and that anchor must still validate later.

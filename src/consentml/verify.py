@@ -248,7 +248,16 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
 
     A hash chain alone cannot detect a wholesale rewrite from genesis. Pass
     expected_head with a previously recorded head_hash -- anchored somewhere
-    outside this database -- to detect that too.
+    outside this database -- to check that the anchor is still present
+    somewhere in the current chain. An entry's hash transitively depends on
+    every entry before it, so finding the anchor proves everything up to
+    that point is byte-for-byte intact; new entries appended after it are a
+    legitimate extension, not a mismatch.
+
+    This proves history up to the anchor point only. It says nothing about
+    entries appended after it -- a sophisticated attacker can append
+    validly-chained forged entries past the anchor, and no anchor taken
+    before those entries can detect that.
     """
     store = LineageStore(db_path=db_path)
     try:
@@ -257,17 +266,21 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
         findings += _check_chain(entries)
         findings += _check_references(entries, parsed, store)
         head_hash = entries[-1]["entry_hash"] if entries else GENESIS_HASH
-        if expected_head is not None and expected_head != head_hash:
-            findings.append(
-                VerificationFinding(
-                    entry_id=None,
-                    code="head_mismatch",
-                    detail=(
-                        "log head does not match the expected anchor; "
-                        "entries may have been removed, reordered, or rewritten"
-                    ),
+        if expected_head is not None:
+            known_hashes = {e["entry_hash"] for e in entries}
+            known_hashes.add(GENESIS_HASH)
+            if expected_head not in known_hashes:
+                findings.append(
+                    VerificationFinding(
+                        entry_id=None,
+                        code="head_mismatch",
+                        detail=(
+                            "the anchored head is not present anywhere in "
+                            "the current chain; history has been rewritten "
+                            "or truncated"
+                        ),
+                    )
                 )
-            )
         findings.sort(key=lambda f: (f.entry_id is None, f.entry_id or 0))
         return VerificationReport(
             ok=not findings,
