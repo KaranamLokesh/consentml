@@ -117,3 +117,14 @@ def test_cli_verify_missing_db_exits_nonzero(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "no lineage database" in out
     assert not missing.exists()
+
+
+def test_cli_verify_unopenable_db_exits_two(tmp_path, capsys):
+    # A directory at the db path can't be opened by sqlite3 at all, so this
+    # never gets far enough to see "no database" -- it's a harder failure.
+    unopenable = tmp_path / "not-a-db.db"
+    unopenable.mkdir()
+    exit_code = main(["verify", "--db", str(unopenable)])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "Error: could not open database" in err

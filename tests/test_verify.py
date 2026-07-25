@@ -528,3 +528,10 @@ def test_head_mismatch_finding_has_no_entry_id(db):
     findings = [f for f in report.findings if f.code == "head_mismatch"]
     assert len(findings) == 1
     assert findings[0].entry_id is None
+
+
+def test_public_api_exports_verify():
+    import consentml
+
+    assert consentml.verify_audit_log is verify_audit_log
+    assert consentml.VerificationReport is VerificationReport
