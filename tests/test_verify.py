@@ -175,7 +175,6 @@ def test_oversized_integer_literal_payload_is_detected_without_raising(db):
     report = verify_audit_log(db_path=db)
     assert "malformed_payload" in _codes(report)
     assert report.ok is False
-    assert report.ok is False
 
 
 def test_deleted_subject_row_is_detected(db):
@@ -187,6 +186,21 @@ def test_deleted_subject_row_is_detected(db):
     findings = [f for f in report.findings if f.code == "subject_count_mismatch"]
     assert len(findings) == 1
     assert "2" in findings[0].detail and "1" in findings[0].detail
+
+
+def test_deleted_subject_with_matching_n_subjects_edit_is_still_detected(db):
+    """The full attack story: delete a subject_index row AND edit
+    training_runs.n_subjects to match, so the tables look internally
+    consistent with each other. Only the hash-chain-protected audit
+    payload still disagrees, which is what subject_count_mismatch must
+    catch -- it has to compare against the live subject_index COUNT(*),
+    never against training_runs.n_subjects, or this attack goes silent."""
+    run_ids = _seed(db, n_runs=1)
+    _sql(db, "DELETE FROM subject_index WHERE run_id = ? AND subject_id_hash = ?",
+         (run_ids[0], "s0a"))
+    _sql(db, "UPDATE training_runs SET n_subjects = 1 WHERE run_id = ?", (run_ids[0],))
+    report = verify_audit_log(db_path=db)
+    assert "subject_count_mismatch" in _codes(report)
 
 
 def test_added_subject_row_is_detected(db):
@@ -209,6 +223,18 @@ def test_modified_model_hash_is_detected(db):
     run_ids = _seed(db, n_runs=1)
     _sql(db, "UPDATE training_runs SET model_hash = ? WHERE run_id = ?",
          ("forged", run_ids[0]))
+    report = verify_audit_log(db_path=db)
+    assert "run_modified" in _codes(report)
+
+
+def test_modified_n_subjects_is_detected(db):
+    """training_runs.n_subjects is attacker-editable and is surfaced to
+    operators via runs_for_subject_value() (which feeds revoke()), so a
+    divergence from the logged value must trip run_modified even when
+    subject_index itself is untouched."""
+    run_ids = _seed(db, n_runs=1)
+    _sql(db, "UPDATE training_runs SET n_subjects = ? WHERE run_id = ?",
+         (99, run_ids[0]))
     report = verify_audit_log(db_path=db)
     assert "run_modified" in _codes(report)
 

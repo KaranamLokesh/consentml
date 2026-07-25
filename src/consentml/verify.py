@@ -212,17 +212,19 @@ def _check_references(entries, parsed, store) -> list:
                     ),
                 )
             )
-        if run["model_hash"] != payload["model_hash"]:
-            findings.append(
-                VerificationFinding(
-                    entry_id=entry["id"],
-                    code="run_modified",
-                    detail=(
-                        f"run {run_id}: model_hash in training_runs differs "
-                        "from the logged value"
-                    ),
+        for field in ("model_hash", "n_subjects"):
+            if run[field] != payload[field]:
+                findings.append(
+                    VerificationFinding(
+                        entry_id=entry["id"],
+                        code="run_modified",
+                        detail=(
+                            f"run {run_id}: {field} in training_runs "
+                            f"({run[field]!r}) differs from the logged "
+                            f"value ({payload[field]!r})"
+                        ),
+                    )
                 )
-            )
 
     # sorted() on raw run_id values would raise TypeError if training_runs
     # ever holds a mix of types (e.g. a BLOB run_id alongside normal TEXT
