@@ -243,19 +243,36 @@ def _check_references(entries, parsed, store) -> list:
     return findings
 
 
-def verify_audit_log(*, db_path=None) -> VerificationReport:
-    """Verify the audit log's hash chain and its agreement with the tables."""
+def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
+    """Verify the audit log's hash chain and its agreement with the tables.
+
+    A hash chain alone cannot detect a wholesale rewrite from genesis. Pass
+    expected_head with a previously recorded head_hash -- anchored somewhere
+    outside this database -- to detect that too.
+    """
     store = LineageStore(db_path=db_path)
     try:
         entries = store.audit_entries()
         parsed, findings = _parse_payloads(entries)
         findings += _check_chain(entries)
         findings += _check_references(entries, parsed, store)
+        head_hash = entries[-1]["entry_hash"] if entries else GENESIS_HASH
+        if expected_head is not None and expected_head != head_hash:
+            findings.append(
+                VerificationFinding(
+                    entry_id=None,
+                    code="head_mismatch",
+                    detail=(
+                        "log head does not match the expected anchor; "
+                        "entries may have been removed, reordered, or rewritten"
+                    ),
+                )
+            )
         findings.sort(key=lambda f: (f.entry_id is None, f.entry_id or 0))
         return VerificationReport(
             ok=not findings,
             n_entries=len(entries),
-            head_hash=entries[-1]["entry_hash"] if entries else GENESIS_HASH,
+            head_hash=head_hash,
             findings=findings,
             generated_at=datetime.now(timezone.utc).isoformat(),
         )

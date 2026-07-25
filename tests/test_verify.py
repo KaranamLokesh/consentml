@@ -365,3 +365,82 @@ def test_mixed_type_unlogged_run_ids_do_not_raise(db):
     report = verify_audit_log(db_path=db)
     findings = [f for f in report.findings if f.code == "unlogged_run"]
     assert len(findings) == 2
+
+
+def test_head_hash_is_the_last_entry_hash(db):
+    _seed(db, n_runs=2)
+    store = LineageStore(db_path=db)
+    try:
+        expected = store.audit_entries()[-1]["entry_hash"]
+    finally:
+        store.close()
+    assert verify_audit_log(db_path=db).head_hash == expected
+
+
+def test_head_hash_of_empty_log_is_genesis(db):
+    LineageStore(db_path=db).close()
+    assert verify_audit_log(db_path=db).head_hash == GENESIS_HASH
+
+
+def test_matching_expected_head_verifies(db):
+    _seed(db, n_runs=2)
+    head = verify_audit_log(db_path=db).head_hash
+    report = verify_audit_log(db_path=db, expected_head=head)
+    assert report.ok is True
+
+
+def test_wholesale_rewrite_is_caught_by_the_anchor(db):
+    _seed(db, n_runs=2)
+    anchored = verify_audit_log(db_path=db).head_hash
+
+    # Rewrite history from genesis: drop the log and rebuild it cleanly.
+    _sql(db, "DELETE FROM audit_log")
+    store = LineageStore(db_path=db)
+    try:
+        store.record_revocation(
+            subject_key="k", n_affected_runs=0, recommended_actions=[]
+        )
+    finally:
+        store.close()
+
+    unanchored = verify_audit_log(db_path=db)
+    assert "entry_hash_mismatch" not in _codes(unanchored)
+
+    anchored_report = verify_audit_log(db_path=db, expected_head=anchored)
+    assert anchored_report.ok is False
+    assert "head_mismatch" in _codes(anchored_report)
+
+
+# -- Robustness: expected_head is caller-supplied (will come from a CLI
+# --expected-head flag), not database-supplied, so it can be any string, an
+# empty string, or a value of the wrong type entirely. Comparison must never
+# raise regardless.
+
+
+def test_expected_head_of_wrong_type_does_not_raise(db):
+    _seed(db, n_runs=2)
+    report = verify_audit_log(db_path=db, expected_head=12345)
+    assert report.ok is False
+    assert "head_mismatch" in _codes(report)
+
+
+def test_expected_head_empty_string_on_nonempty_log_is_mismatch(db):
+    _seed(db, n_runs=2)
+    report = verify_audit_log(db_path=db, expected_head="")
+    assert report.ok is False
+    assert "head_mismatch" in _codes(report)
+
+
+def test_expected_head_none_is_not_checked(db):
+    _seed(db, n_runs=2)
+    report = verify_audit_log(db_path=db, expected_head=None)
+    assert report.ok is True
+    assert "head_mismatch" not in _codes(report)
+
+
+def test_head_mismatch_finding_has_no_entry_id(db):
+    _seed(db, n_runs=2)
+    report = verify_audit_log(db_path=db, expected_head="f" * 64)
+    findings = [f for f in report.findings if f.code == "head_mismatch"]
+    assert len(findings) == 1
+    assert findings[0].entry_id is None
