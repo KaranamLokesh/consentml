@@ -319,15 +319,23 @@ def test_oversized_integer_run_id_does_not_raise(db):
 
 def test_mixed_type_unlogged_run_ids_do_not_raise(db):
     """training_runs.run_id has TEXT affinity but SQLite still allows a
-    BLOB to be stored there directly. Mixing that with the normal TEXT
-    run_ids of other unlogged rows must not crash sorted()."""
-    _seed(db, n_runs=1)
+    BLOB to be stored there directly. sorted() on the unlogged-run-id set
+    must not crash when it has to compare across types -- which requires
+    at least two unlogged run_ids of genuinely different types, or the
+    comparison is never actually exercised."""
+    LineageStore(db_path=db).close()
     _sql(
         db,
         "INSERT INTO training_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (b"\x00\x01blob-run-id", "shadow", "h", "src", "email", 1, 0,
+        ("text-run-id", "shadow-a", "h", "src", "email", 1, 0,
+         "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
+    )
+    _sql(
+        db,
+        "INSERT INTO training_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (b"\x00\x01blob-run-id", "shadow-b", "h", "src", "email", 1, 0,
          "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
     report = verify_audit_log(db_path=db)
     findings = [f for f in report.findings if f.code == "unlogged_run"]
-    assert len(findings) == 1
+    assert len(findings) == 2
