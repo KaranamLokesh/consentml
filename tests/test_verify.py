@@ -492,6 +492,13 @@ def test_expected_head_of_wrong_type_does_not_raise(db):
     assert "head_mismatch" in _codes(report)
 
 
+def test_unhashable_expected_head_does_not_raise(db):
+    _seed(db, n_runs=1)
+    for value in ([1, 2], {"a": 1}):
+        report = verify_audit_log(db_path=db, expected_head=value)
+        assert "head_mismatch" in _codes(report)
+
+
 def test_expected_head_empty_string_on_nonempty_log_is_mismatch(db):
     _seed(db, n_runs=2)
     report = verify_audit_log(db_path=db, expected_head="")

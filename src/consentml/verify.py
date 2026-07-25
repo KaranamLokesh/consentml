@@ -267,9 +267,14 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
         findings += _check_references(entries, parsed, store)
         head_hash = entries[-1]["entry_hash"] if entries else GENESIS_HASH
         if expected_head is not None:
-            known_hashes = {e["entry_hash"] for e in entries}
-            known_hashes.add(GENESIS_HASH)
-            if expected_head not in known_hashes:
+            # expected_head is caller-supplied and may be any type, including
+            # unhashable ones (a list, a dict) -- a set (and `in` against it)
+            # would raise on those. A linear == scan never raises for any
+            # pair of types, so use that even though it costs O(n); this
+            # function already makes several O(n) passes over entries, and
+            # audit logs are small.
+            known = [GENESIS_HASH] + [e["entry_hash"] for e in entries]
+            if not any(expected_head == h for h in known):
                 findings.append(
                     VerificationFinding(
                         entry_id=None,
