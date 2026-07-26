@@ -123,3 +123,10 @@ def test_public_api_exports():
 
     assert consentml.track is track
     assert consentml.ConsentMLError is ConsentMLError
+
+
+def test_consentml_error_importable_from_errors_module():
+    from consentml.errors import ConsentMLError as FromErrors
+    from consentml.track import ConsentMLError as FromTrack
+
+    assert FromErrors is FromTrack

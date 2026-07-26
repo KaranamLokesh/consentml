@@ -1,7 +1,8 @@
 """ConsentML: training-data lineage and consent-revocation reporting."""
 
+from consentml.errors import ConsentMLError
 from consentml.revoke import AffectedModel, AffectedModelsReport, revoke
-from consentml.track import ConsentMLError, track
+from consentml.track import track
 from consentml.verify import (
     VerificationFinding,
     VerificationReport,

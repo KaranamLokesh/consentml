@@ -7,12 +7,9 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from consentml.errors import ConsentMLError
 from consentml.hashing import hash_subject_id
 from consentml.store import LineageStore
-
-
-class ConsentMLError(Exception):
-    """Raised for ConsentML usage errors (bad arguments, missing data)."""
 
 
 def _find_dataframe(args, kwargs):
