@@ -206,3 +206,43 @@ def test_cli_migrate_allow_unverified_migrates_tampered(tmp_path, capsys, build_
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "Migrated" in out
+
+
+def test_cli_migrate_unopenable_db_exits_two(tmp_path, capsys):
+    # A directory at the db path can't be opened by sqlite3 at all -- never
+    # read, so this must report exit 2 (couldn't read it), the same as
+    # verify's equivalent case, not exit 1 (read it, found a problem).
+    unopenable = tmp_path / "not-a-db.db"
+    unopenable.mkdir()
+    exit_code = main(["migrate", "--db", str(unopenable)])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "Error: could not open database" in err
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores file permission bits, so chmod 000 wouldn't block reads",
+)
+def test_cli_migrate_permission_denied_db_exits_two(tmp_path, capsys, build_legacy):
+    # A real, valid legacy database that the process simply cannot read.
+    unreadable = tmp_path / "legacy.db"
+    build_legacy(unreadable)
+    os.chmod(unreadable, 0o000)
+    try:
+        exit_code = main(["migrate", "--db", str(unreadable)])
+    finally:
+        os.chmod(unreadable, 0o644)  # restore so tmp_path cleanup can remove it
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "Error: could not open database" in err
+
+
+def test_cli_migrate_small_db_reports_growth_accurately(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    assert main(["migrate", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "0.0 MB -> 0.0 MB" not in out
+    assert "KB" in out
+    assert "fixed overhead" in out

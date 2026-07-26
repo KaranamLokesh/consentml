@@ -121,16 +121,30 @@ def migrate_database(*, db_path=None, allow_unverified=False) -> MigrationResult
     Verifies before and after. Refuses to migrate a database that fails
     verification unless allow_unverified is set.
 
-    This function runs on attacker-controlled data and must never raise --
-    like verify_audit_log(), any failure is reported as a MigrationResult,
-    never a traceback. _migrate_database does the real work; every step
-    that touches the original database is already individually guarded
-    (sqlite3.DatabaseError, sqlite3.Error, OSError), so this outer catch is
-    a last-resort net for whatever that per-step analysis missed, not a
-    substitute for it.
+    This function's never-raise contract covers hostile *database contents*
+    -- like verify_audit_log(), a corrupt or tampered lineage database is
+    always reported as a MigrationResult, never a traceback. It does NOT
+    cover I/O failures while opening the database: a directory at the path
+    or a permission-denied file was never read at all, which is a different
+    operator problem (fix the path / fix permissions) from "this is a
+    readable database with a problem in it" -- so sqlite3.Error and OSError
+    raised while opening the original database are deliberately let through
+    here, exactly as verify_audit_log() lets them through, so the CLI can
+    report that class of failure distinctly (exit 2, vs. exit 1 for a
+    reported finding). Widening this except to swallow them would make exit
+    2 unreachable and silently mislabel "permission denied" as "database
+    problem". _migrate_database does the real work; every step that touches
+    the original database is already individually guarded, so this outer
+    catch is a last-resort net for whatever that per-step analysis missed,
+    not a substitute for it.
     """
     try:
         return _migrate_database(db_path=db_path, allow_unverified=allow_unverified)
+    except (sqlite3.Error, OSError):
+        # Open/read failures on the original database -- see docstring.
+        # Must propagate uncaught so the CLI can distinguish exit 2 from
+        # exit 1.
+        raise
     except Exception as exc:  # noqa: BLE001 -- last-resort net, see docstring
         db = Path(db_path) if db_path is not None else default_db_path()
         return MigrationResult(
@@ -149,18 +163,15 @@ def _migrate_database(*, db_path=None, allow_unverified=False) -> MigrationResul
             error=f"no lineage database at {db}",
         )
 
+    # Deliberately not caught here: sqlite3.Error/OSError from opening a
+    # directory or a permission-denied file means the database was never
+    # read at all, which must propagate out to migrate_database()'s caller
+    # (see its docstring) rather than being reported as a MigrationResult.
+    conn = sqlite3.connect(db)
     try:
-        conn = sqlite3.connect(db)
-        try:
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
-        finally:
-            conn.close()
-    except sqlite3.DatabaseError as exc:
-        return MigrationResult(
-            migrated=False,
-            already_current=False,
-            error=f"{db} is not a valid SQLite database: {exc}",
-        )
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
     if version >= SCHEMA_VERSION:
         return MigrationResult(
             migrated=False, already_current=True, bytes_before=db.stat().st_size

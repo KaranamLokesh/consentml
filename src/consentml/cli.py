@@ -47,6 +47,25 @@ def _print_verify_summary(report):
     print(f"head: {report.head_hash}")
 
 
+def _format_bytes(n: int) -> str:
+    """Format a byte count with the smallest unit that keeps it readable.
+
+    A fixed MB scale makes any database under a few hundred KB round to
+    "0.0 MB" on both sides of a migration, which reads as if nothing
+    happened. Adaptive units keep small databases legible.
+    """
+    if n < 1024:
+        return f"{n} bytes"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _format_delta(n: int) -> str:
+    sign = "+" if n >= 0 else "-"
+    return f"{sign}{_format_bytes(abs(n))}"
+
+
 def _print_migrate_summary(result):
     if result.already_current:
         print("Database is already on the current schema; nothing to do.")
@@ -57,11 +76,21 @@ def _print_migrate_summary(result):
             where = f"entry {f.entry_id}" if f.entry_id is not None else "tables"
             print(f"  - [{f.code}] {where}: {f.detail}")
         return
-    saved = result.bytes_before - result.bytes_after
+    delta = result.bytes_after - result.bytes_before
     print(
-        f"Migrated: {result.bytes_before / 1e6:.1f} MB -> "
-        f"{result.bytes_after / 1e6:.1f} MB ({saved / 1e6:+.1f} MB)."
+        f"Migrated: {_format_bytes(result.bytes_before)} -> "
+        f"{_format_bytes(result.bytes_after)} ({_format_delta(delta)})."
     )
+    if delta > 0:
+        # The expected outcome for small databases: the interned schema's
+        # extra tables and indexes carry fixed overhead that only nets a
+        # win once subjects repeat across many runs. Without this note, a
+        # small database growing after migration reads like a bug.
+        print(
+            "The new schema's tables and indexes add fixed overhead; "
+            "deduplication only pays off once subjects repeat across many "
+            "runs."
+        )
     print(f"Original kept at {result.backup_path}")
 
 
