@@ -152,9 +152,12 @@ def _check_references(entries, parsed, store) -> tuple[list, int]:
     runs are recorded.
 
     Returns (findings, n_legacy_runs). A legacy run is one whose audit payload
-    predates provenance hashing -- its provenance is intended to be backfilled
-    by a future migration and is NOT hash-protected, so it is counted and
-    reported rather than silently passing as if it had been checked.
+    predates provenance hashing. Before migration its "provenance" is the
+    original free-text data_source, read live via a legacy column alias;
+    migration (consentml.migrate) backfills it into structured "legacy" JSON
+    without touching the already-hashed audit entry. Either way it is NOT
+    hash-protected, so it is counted and reported rather than silently
+    passing as if it had been checked.
     """
     findings = []
     logged_run_ids = set()
@@ -266,13 +269,13 @@ def _check_references(entries, parsed, store) -> tuple[list, int]:
         elif "data_source" in payload:
             # Pre-v2 entry: its payload was hashed before provenance existed
             # and must never be rewritten, or the hash chain over it would
-            # no longer match (a migration is expected to backfill
-            # training_runs.provenance from this free-text field without
-            # touching the already-hashed audit entry) -- so there is
-            # nothing to check it against. Counted by run_id, not by entry,
-            # so a run with more than one legacy entry isn't reported as
-            # more than one unverified run. Reported so the report can say
-            # so rather than implying it verified something it did not.
+            # no longer match (migration backfills training_runs.provenance
+            # from this free-text field without touching the already-hashed
+            # audit entry) -- so there is nothing to check it against.
+            # Counted by run_id, not by entry, so a run with more than one
+            # legacy entry isn't reported as more than one unverified run.
+            # Reported so the report can say so rather than implying it
+            # verified something it did not.
             legacy_run_ids.add(run_id)
         else:
             # Neither key: not a shape any schema version ever wrote. Must

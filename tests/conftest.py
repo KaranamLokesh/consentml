@@ -140,3 +140,106 @@ def append_entry():
     Exposed as a fixture for the same reason as build_legacy above.
     """
     return append_audit_entry
+
+
+_V1_SCHEMA = """
+CREATE TABLE training_runs (
+    run_pk INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    model_name TEXT NOT NULL,
+    model_hash TEXT NOT NULL,
+    data_source TEXT NOT NULL,
+    subject_id_col TEXT NOT NULL,
+    subject_ids_hashed INTEGER NOT NULL,
+    n_subjects INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL
+);
+CREATE TABLE subjects (
+    subject_pk INTEGER PRIMARY KEY,
+    subject_key TEXT NOT NULL UNIQUE
+);
+CREATE TABLE subject_index (
+    run_pk INTEGER NOT NULL REFERENCES training_runs(run_pk),
+    subject_pk INTEGER NOT NULL REFERENCES subjects(subject_pk)
+);
+CREATE INDEX idx_si_subject ON subject_index(subject_pk);
+CREATE INDEX idx_si_run ON subject_index(run_pk);
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    prev_hash TEXT NOT NULL,
+    entry_hash TEXT NOT NULL
+);
+"""
+
+
+def build_v1_db(path, runs=(("churn_v3", ("h1", "h2")),)):
+    """Write a schema-v1 database with a valid hash chain. Returns run_ids.
+
+    Mirrors build_legacy_db above, just against the interned v1 layout
+    (subjects/subject_index by run_pk/subject_pk instead of inline
+    subject_id_hash). The audit entry for each run is appended via the
+    shared append_audit_entry helper rather than re-deriving the hash-chain
+    arithmetic here -- see that helper's docstring for why this used to
+    drift across three copies. append_audit_entry reads the current last
+    row itself, so calling it once per run in order chains them correctly
+    without this function tracking prev_hash by hand.
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(_V1_SCHEMA)
+    conn.execute("PRAGMA user_version = 1")
+    run_ids = []
+    for i, (model_name, subjects) in enumerate(runs):
+        run_id = f"run-{i}"
+        run_ids.append(run_id)
+        started = f"2026-07-{i + 1:02d}T00:00:00+00:00"
+        cur = conn.execute(
+            "INSERT INTO training_runs (run_id, model_name, model_hash, "
+            "data_source, subject_id_col, subject_ids_hashed, n_subjects, "
+            "started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, model_name, f"hash_{i}", "postgres://prod/customers",
+             "email", 1, len(subjects), started, started),
+        )
+        run_pk = cur.lastrowid
+        conn.executemany(
+            "INSERT OR IGNORE INTO subjects (subject_key) VALUES (?)",
+            [(s,) for s in subjects],
+        )
+        conn.executemany(
+            "INSERT INTO subject_index (run_pk, subject_pk) "
+            "SELECT ?, subject_pk FROM subjects WHERE subject_key = ?",
+            [(run_pk, s) for s in subjects],
+        )
+        conn.commit()
+        payload = json.dumps(
+            {
+                "run_id": run_id,
+                "model_name": model_name,
+                "model_hash": f"hash_{i}",
+                "data_source": "postgres://prod/customers",
+                "n_subjects": len(subjects),
+            },
+            sort_keys=True,
+        )
+        append_audit_entry(path, "training_run", payload)
+    conn.close()
+    return run_ids
+
+
+@pytest.fixture
+def v1_db(tmp_path):
+    """A schema-v1 database with two runs sharing a subject."""
+    path = tmp_path / "v1.db"
+    build_v1_db(path, runs=(("churn_v3", ("h1", "h2")), ("upsell", ("h1", "h3"))))
+    return path
+
+
+@pytest.fixture
+def build_v1():
+    """The v1 builder itself, for tests needing a custom run/subject layout
+    or a specific path -- mirrors the build_legacy fixture above, and for
+    the same reason (no `from conftest import ...`)."""
+    return build_v1_db

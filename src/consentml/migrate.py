@@ -1,4 +1,4 @@
-"""Migrate a v0 lineage database onto the interned v1 schema.
+"""Migrate a v0 or v1 lineage database onto the v2 provenance schema.
 
 The migration is gated by verification on both sides. It refuses to run on a
 database that fails verification, because rewriting a tampered database
@@ -15,11 +15,21 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from consentml.store import SCHEMA_VERSION, _SCHEMA, default_db_path
+from consentml.store import (
+    SCHEMA_VERSION,
+    _SCHEMA,
+    default_db_path,
+    provenance_text,
+)
 from consentml.verify import VerificationFinding, verify_audit_log
 
-_RUN_COLS_V0 = (
+_LEGACY_RUN_COLS = (
     "run_id, model_name, model_hash, data_source, subject_id_col, "
+    "subject_ids_hashed, n_subjects, started_at, finished_at"
+)
+
+_V2_RUN_COLS = (
+    "run_id, model_name, model_hash, provenance, "
     "subject_ids_hashed, n_subjects, started_at, finished_at"
 )
 
@@ -49,8 +59,47 @@ class MigrationResult:
         }
 
 
-def _copy_into_v1(src_path, dst_path):
-    """Build a v1 database at dst_path from the v0 database at src_path."""
+def _legacy_provenance(data_source, subject_id_col) -> str:
+    """Represent a pre-v2 data_source faithfully.
+
+    Nothing is invented: the old free-text value is preserved verbatim under
+    a kind that says exactly where it came from, so a reader can tell a
+    migrated assertion from a connector-verified record.
+    """
+    return provenance_text(
+        {
+            "kind": "legacy",
+            "label": data_source,
+            "subject_id_col": subject_id_col,
+        }
+    )
+
+
+def _subject_rows(src, version):
+    """Yield (run_id, subject_key) for either source schema.
+
+    v0 stores the key inline on subject_index; v1 interns it. Normalizing
+    here means the insert path below is identical for both.
+    """
+    if version == 0:
+        return src.execute("SELECT run_id, subject_id_hash FROM subject_index")
+    return src.execute(
+        "SELECT r.run_id, s.subject_key FROM subject_index si "
+        "JOIN training_runs r ON r.run_pk = si.run_pk "
+        "JOIN subjects s ON s.subject_pk = si.subject_pk"
+    )
+
+
+def _copy_into_v2(src_path, dst_path, src_version):
+    """Build a v2 database at dst_path from a v0 or v1 database at src_path.
+
+    The audit_log is copied verbatim and never rewritten: its entries were
+    hashed over payloads containing data_source, so regenerating them would
+    invalidate every entry hash and turn a clean database into a failing one.
+    A migrated database therefore holds pre-v2 payloads permanently, and
+    verify_audit_log() treats them as legacy rather than checking provenance
+    it has no recorded hash for.
+    """
     dst = sqlite3.connect(dst_path)
     try:
         dst.executescript(_SCHEMA)
@@ -58,36 +107,41 @@ def _copy_into_v1(src_path, dst_path):
         src = sqlite3.connect(src_path)
         try:
             with dst:
-                for row in src.execute(f"SELECT {_RUN_COLS_V0} FROM training_runs"):
+                for row in src.execute(
+                    f"SELECT {_LEGACY_RUN_COLS} FROM training_runs"
+                ):
+                    (run_id, model_name, model_hash, data_source,
+                     subject_id_col, hashed, n_subjects, started, finished) = row
                     dst.execute(
-                        f"INSERT INTO training_runs ({_RUN_COLS_V0}) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        row,
+                        f"INSERT INTO training_runs ({_V2_RUN_COLS}) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            run_id, model_name, model_hash,
+                            _legacy_provenance(data_source, subject_id_col),
+                            hashed, n_subjects, started, finished,
+                        ),
                     )
+                subject_rows = list(_subject_rows(src, src_version))
                 # Intern the keys: each distinct value stored once...
                 dst.executemany(
                     "INSERT OR IGNORE INTO subjects (subject_key) VALUES (?)",
-                    src.execute("SELECT DISTINCT subject_id_hash FROM subject_index"),
+                    [(key,) for _, key in subject_rows],
                 )
                 # ...but one index row per original row, so per-run counts
                 # are preserved exactly.
                 #
-                # Measured ~8us/row (1.60s for 200k subject_index rows) with
-                # this per-row executemany, each doing a two-table lookup.
-                # A set-based rewrite (ATTACH the source db, single
-                # INSERT...SELECT...JOIN) measured ~10x faster on the same
-                # 200k rows. Deliberately not taken: migration is a one-time
-                # offline operation -- even at millions of rows this is
-                # minutes, not hours -- and this is the one piece of code
-                # whose entire job is not corrupting an audit trail, so the
-                # simpler, more obviously-correct version is worth the
-                # extra wall-clock time. Revisit if real databases grow
-                # large enough that this stops being true.
+                # Measured ~8us/row with this per-row executemany, each doing
+                # a two-table lookup. A set-based rewrite (ATTACH the source
+                # db, single INSERT...SELECT...JOIN) measured ~10x faster.
+                # Deliberately not taken: migration is a one-time offline
+                # operation, and this is the one piece of code whose entire
+                # job is not corrupting an audit trail, so the simpler, more
+                # obviously-correct version is worth the wall-clock time.
                 dst.executemany(
                     "INSERT INTO subject_index (run_pk, subject_pk) "
                     "SELECT r.run_pk, s.subject_pk FROM training_runs r, subjects s "
                     "WHERE r.run_id = ? AND s.subject_key = ?",
-                    src.execute("SELECT run_id, subject_id_hash FROM subject_index"),
+                    subject_rows,
                 )
                 for row in src.execute(
                     "SELECT id, timestamp, event_type, payload, prev_hash, "
@@ -116,7 +170,7 @@ def _row_counts(path) -> dict:
 
 
 def migrate_database(*, db_path=None, allow_unverified=False) -> MigrationResult:
-    """Migrate a lineage database onto schema v1.
+    """Migrate a lineage database onto schema v2.
 
     Verifies before and after. Refuses to migrate a database that fails
     verification unless allow_unverified is set.
@@ -198,7 +252,7 @@ def _migrate_database(*, db_path=None, allow_unverified=False) -> MigrationResul
     staging.unlink(missing_ok=True)
     try:
         try:
-            _copy_into_v1(db, staging)
+            _copy_into_v2(db, staging, version)
         except sqlite3.Error as exc:
             return MigrationResult(
                 migrated=False,

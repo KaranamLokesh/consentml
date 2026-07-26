@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import sqlite3
 
@@ -26,7 +27,7 @@ def test_migrates_a_legacy_database(legacy_db):
     assert result.already_current is False
     s = LineageStore(db_path=legacy_db)
     try:
-        assert s.schema_version == 1
+        assert s.schema_version == 2
     finally:
         s.close()
 
@@ -38,11 +39,19 @@ def test_verification_clean_before_and_after(legacy_db):
 
 
 def test_revoke_reports_are_identical_across_migration(legacy_db):
+    """Migration is expected to change *how* provenance is represented (the
+    v0 free-text data_source becomes structured "legacy" JSON -- that's the
+    whole point of this migration), so provenance itself is excluded from
+    the comparison. Everything else revoke() reports -- which models were
+    affected, their run_id/model_hash/timestamps, and the recommended
+    actions -- must be unaffected by migration."""
     before = revoke(subject_id="h1", db_path=legacy_db, dry_run=True).to_dict()
     migrate_database(db_path=legacy_db)
     after = revoke(subject_id="h1", db_path=legacy_db, dry_run=True).to_dict()
     for report in (before, after):
         report.pop("generated_at")
+        for model in report["affected_models"]:
+            model.pop("provenance")
     assert before == after
 
 
@@ -225,7 +234,7 @@ def test_row_count_mismatch_is_caught_and_refused(tmp_path, build_legacy):
     with no audit_log entry mentioning it either, is invisible to
     verify_audit_log()'s audit-log-anchored checks -- it never shows up as a
     subject_count_mismatch for any real run. The join-based copy in
-    _copy_into_v1 silently drops such a row (no match, no insert), which the
+    _copy_into_v2 silently drops such a row (no match, no insert), which the
     raw row-count comparison exists specifically to catch."""
     db = tmp_path / "legacy.db"
     build_legacy(db, runs=(("a", ("h1", "h2")),))
@@ -350,3 +359,61 @@ def test_finalize_failure_when_restore_also_fails(tmp_path, build_legacy, monkey
 
     assert result.migrated is False
     assert "could not be restored" in result.error
+
+
+def _provenances(db):
+    conn = sqlite3.connect(db)
+    try:
+        return [json.loads(r[0])
+                for r in conn.execute("SELECT provenance FROM training_runs")]
+    finally:
+        conn.close()
+
+
+def test_v1_migrates_to_v2_with_legacy_provenance(v1_db):
+    result = migrate_database(db_path=v1_db)
+    assert result.migrated, result.error
+    conn = sqlite3.connect(v1_db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.close()
+    assert _provenances(v1_db) == [
+        {"kind": "legacy", "label": "postgres://prod/customers",
+         "subject_id_col": "email"},
+        {"kind": "legacy", "label": "postgres://prod/customers",
+         "subject_id_col": "email"},
+    ]
+
+
+def test_v0_migrates_straight_to_v2(legacy_db):
+    result = migrate_database(db_path=legacy_db)
+    assert result.migrated, result.error
+    conn = sqlite3.connect(legacy_db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.close()
+    assert all(p["kind"] == "legacy" for p in _provenances(legacy_db))
+
+
+def test_migration_leaves_the_audit_log_byte_identical(v1_db):
+    conn = sqlite3.connect(v1_db)
+    before = conn.execute(
+        "SELECT id, timestamp, event_type, payload, prev_hash, entry_hash "
+        "FROM audit_log ORDER BY id"
+    ).fetchall()
+    conn.close()
+
+    assert migrate_database(db_path=v1_db).migrated
+
+    conn = sqlite3.connect(v1_db)
+    after = conn.execute(
+        "SELECT id, timestamp, event_type, payload, prev_hash, entry_hash "
+        "FROM audit_log ORDER BY id"
+    ).fetchall()
+    conn.close()
+    assert after == before
+
+
+def test_migrated_database_verifies_clean_and_counts_legacy_runs(v1_db):
+    assert migrate_database(db_path=v1_db).migrated
+    report = verify_audit_log(db_path=v1_db)
+    assert report.ok, [f.detail for f in report.findings]
+    assert report.n_legacy_runs == 2

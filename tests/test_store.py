@@ -286,99 +286,9 @@ def test_legacy_writes_are_refused(legacy_db):
         s.close()
 
 
-def _build_v1_db(path):
-    """A schema-v1 database: interned subjects/subject_index (the same
-    run_pk/subject_pk layout v2 uses), but training_runs still has
-    data_source/subject_id_col instead of provenance -- v1 was the current
-    schema until this task bumped it to v2, so this is an honest, un-tampered
-    database, not hostile input. Returns the run_id.
-
-    A local builder, not a conftest fixture: a later migration task adds a
-    shared v1 fixture once more of the suite needs one.
-    """
-    conn = sqlite3.connect(path)
-    try:
-        conn.executescript(
-            """
-            CREATE TABLE training_runs (
-                run_pk INTEGER PRIMARY KEY,
-                run_id TEXT NOT NULL UNIQUE,
-                model_name TEXT NOT NULL,
-                model_hash TEXT NOT NULL,
-                data_source TEXT NOT NULL,
-                subject_id_col TEXT NOT NULL,
-                subject_ids_hashed INTEGER NOT NULL,
-                n_subjects INTEGER NOT NULL,
-                started_at TEXT NOT NULL,
-                finished_at TEXT NOT NULL
-            );
-            CREATE TABLE subjects (
-                subject_pk INTEGER PRIMARY KEY,
-                subject_key TEXT NOT NULL UNIQUE
-            );
-            CREATE TABLE subject_index (
-                run_pk INTEGER NOT NULL REFERENCES training_runs(run_pk),
-                subject_pk INTEGER NOT NULL REFERENCES subjects(subject_pk)
-            );
-            CREATE INDEX idx_si_subject ON subject_index(subject_pk);
-            CREATE INDEX idx_si_run ON subject_index(run_pk);
-            CREATE TABLE audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                prev_hash TEXT NOT NULL,
-                entry_hash TEXT NOT NULL
-            );
-            """
-        )
-        conn.execute("PRAGMA user_version = 1")
-        run_id = "run-0"
-        cursor = conn.execute(
-            "INSERT INTO training_runs (run_id, model_name, model_hash, "
-            "data_source, subject_id_col, subject_ids_hashed, n_subjects, "
-            "started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (run_id, "churn_v3", "hash_0", "postgres://prod/customers", "email",
-             1, 2, "2026-07-01T00:00:00+00:00", "2026-07-01T00:01:00+00:00"),
-        )
-        run_pk = cursor.lastrowid
-        conn.executemany(
-            "INSERT INTO subjects (subject_key) VALUES (?)", [("h1",), ("h2",)]
-        )
-        conn.executemany(
-            "INSERT INTO subject_index (run_pk, subject_pk) "
-            "SELECT ?, subject_pk FROM subjects WHERE subject_key = ?",
-            [(run_pk, "h1"), (run_pk, "h2")],
-        )
-        timestamp = "2026-07-01T00:00:01+00:00"
-        payload = json.dumps(
-            {
-                "run_id": run_id,
-                "model_name": "churn_v3",
-                "model_hash": "hash_0",
-                "data_source": "postgres://prod/customers",
-                "n_subjects": 2,
-            },
-            sort_keys=True,
-        )
-        genesis = "0" * 64
-        entry_hash = hashlib.sha256(
-            (genesis + timestamp + "training_run" + payload).encode("utf-8")
-        ).hexdigest()
-        conn.execute(
-            "INSERT INTO audit_log (timestamp, event_type, payload, prev_hash, "
-            "entry_hash) VALUES (?, ?, ?, ?, ?)",
-            (timestamp, "training_run", payload, genesis, entry_hash),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return run_id
-
-
-def test_v1_database_reports_version_one(tmp_path):
+def test_v1_database_reports_version_one(tmp_path, build_v1):
     path = tmp_path / "v1.db"
-    _build_v1_db(path)
+    build_v1(path)
     s = LineageStore(db_path=path)
     try:
         assert s.schema_version == 1
@@ -386,13 +296,13 @@ def test_v1_database_reports_version_one(tmp_path):
         s.close()
 
 
-def test_v1_database_reads_work(tmp_path):
+def test_v1_database_reads_work(tmp_path, build_v1):
     """A v1 database predates the provenance column but is not hostile --
     it's exactly what every database looked like before this task. All the
     read paths that transitively depend on the training_runs column list
     must keep working against it, not raise OperationalError."""
     path = tmp_path / "v1.db"
-    run_id = _build_v1_db(path)
+    run_id = build_v1(path)[0]
     s = LineageStore(db_path=path)
     try:
         assert s.run_by_id(run_id)["model_name"] == "churn_v3"
@@ -408,9 +318,9 @@ def test_v1_database_reads_work(tmp_path):
         s.close()
 
 
-def test_v1_database_writes_are_refused(tmp_path):
+def test_v1_database_writes_are_refused(tmp_path, build_v1):
     path = tmp_path / "v1.db"
-    _build_v1_db(path)
+    build_v1(path)
     s = LineageStore(db_path=path)
     try:
         with pytest.raises(ConsentMLError, match="consentml migrate"):
@@ -419,14 +329,14 @@ def test_v1_database_writes_are_refused(tmp_path):
         s.close()
 
 
-def test_v1_database_verifies_without_raising(tmp_path):
+def test_v1_database_verifies_without_raising(tmp_path, build_v1):
     """The correctness bug this test guards against: verify_audit_log()'s
     contract is never raise on hostile database contents, and an honest,
     un-tampered v1 database is not hostile -- it must produce a clean
     report, not a traceback, from the OperationalError this schema change
     could otherwise introduce for every v1 database in the wild."""
     path = tmp_path / "v1.db"
-    _build_v1_db(path)
+    build_v1(path)
     report = verify_audit_log(db_path=path)
     assert report.ok is True
 
