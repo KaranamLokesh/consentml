@@ -3,8 +3,10 @@
 verify_audit_log() is strictly read-only. It never repairs, records no audit
 event of its own -- a self-recorded "I verified myself" entry would carry no
 more trust than the log containing it -- and never creates or modifies the
-database, including never provisioning one that doesn't exist yet. Staying
-read-only means a copy of a production database can be checked safely.
+database, including never provisioning one that doesn't exist yet, or one
+that exists but isn't a ConsentML lineage database (empty, foreign schema,
+or not a SQLite file at all). Staying read-only means a copy of a
+production database can be checked safely.
 """
 
 import hashlib
@@ -245,6 +247,37 @@ def _check_references(entries, parsed, store) -> list:
     return findings
 
 
+def _is_lineage_database(db) -> bool:
+    """True if db contains an audit_log table.
+
+    Opened strictly read-only via a URI connection, so this probe can never
+    create or modify the file no matter what it contains -- unlike a plain
+    sqlite3.connect() or LineageStore, either of which will happily
+    provision a fresh empty schema onto a file that doesn't have one yet.
+    A 0-byte file lands here: SQLite opens it as a valid, empty database,
+    so the query below runs cleanly and simply finds no audit_log table.
+
+    Deliberately does NOT catch sqlite3.Error or OSError here. Those mean
+    the file could not be read at all -- permission denied, a directory,
+    bytes that aren't a SQLite database -- which is a different operator
+    problem from "this is a readable database that just isn't ours" (fix
+    permissions/the path, vs. fix --db). verify_audit_log() has always let
+    that class of failure propagate so the CLI can report it distinctly
+    (exit 2, vs. exit 1 for a reported finding); this function's never-raise
+    contract covers hostile *database contents*, not I/O failures, and
+    widening this except to swallow them would make exit 2 unreachable and
+    silently mislabel "permission denied" as "wrong --db path".
+    """
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_log'"
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
     """Verify the audit log's hash chain and its agreement with the tables.
 
@@ -278,6 +311,30 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
                     entry_id=None,
                     code="missing_database",
                     detail=f"no lineage database at {db}",
+                )
+            ],
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+    if not _is_lineage_database(db):
+        # The path exists but isn't a ConsentML lineage database: empty
+        # file, a directory, a foreign SQLite database, or not a SQLite
+        # file at all. A distinct code from missing_database on purpose --
+        # the two conditions have different fixes (wrong path vs. wrong
+        # file) and an operator debugging "missing database" against a
+        # file that plainly exists would go looking in the wrong place.
+        # Checked with a strictly read-only connection, before
+        # LineageStore ever touches the path, because LineageStore would
+        # provision a fresh empty v1 schema onto exactly this kind of file
+        # and then report a clean bill of health for it.
+        return VerificationReport(
+            ok=False,
+            n_entries=0,
+            head_hash=GENESIS_HASH,
+            findings=[
+                VerificationFinding(
+                    entry_id=None,
+                    code="not_a_lineage_database",
+                    detail=f"{db} does not look like a ConsentML lineage database",
                 )
             ],
             generated_at=datetime.now(timezone.utc).isoformat(),

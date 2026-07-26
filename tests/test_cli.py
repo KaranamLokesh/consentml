@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 
 import pytest
@@ -121,10 +122,145 @@ def test_cli_verify_missing_db_exits_nonzero(tmp_path, capsys):
 
 def test_cli_verify_unopenable_db_exits_two(tmp_path, capsys):
     # A directory at the db path can't be opened by sqlite3 at all, so this
-    # never gets far enough to see "no database" -- it's a harder failure.
+    # never gets far enough to see "no database" -- it's a harder failure,
+    # distinct from not_a_lineage_database (a readable file that just isn't
+    # ours). verify_audit_log() lets this propagate on purpose so the CLI
+    # can tell "wrong --db path" apart from "couldn't read it at all".
     unopenable = tmp_path / "not-a-db.db"
     unopenable.mkdir()
     exit_code = main(["verify", "--db", str(unopenable)])
     assert exit_code == 2
     err = capsys.readouterr().err
     assert "Error: could not open database" in err
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores file permission bits, so chmod 000 wouldn't block reads",
+)
+def test_cli_verify_permission_denied_db_exits_two(tmp_path, capsys):
+    # A real, valid lineage database that the process simply cannot read.
+    # Distinct from not_a_lineage_database in the same way as the directory
+    # case above: this is an I/O failure (fix permissions), not "wrong
+    # --db path" (fix the path) -- and unlike the directory case, this one
+    # actually is a lineage database, so it must not be reported as if it
+    # weren't.
+    unreadable = tmp_path / "lineage.db"
+    LineageStore(db_path=unreadable).close()
+    os.chmod(unreadable, 0o000)
+    try:
+        exit_code = main(["verify", "--db", str(unreadable)])
+    finally:
+        os.chmod(unreadable, 0o644)  # restore so tmp_path cleanup can remove it
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "Error: could not open database" in err
+
+
+def test_cli_migrate_succeeds(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    assert main(["migrate", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "Migrated" in out
+
+
+def test_cli_migrate_is_idempotent(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    main(["migrate", "--db", str(db)])
+    capsys.readouterr()
+    assert main(["migrate", "--db", str(db)]) == 0
+    assert "already" in capsys.readouterr().out.lower()
+
+
+def test_cli_migrate_refuses_tampered_and_exits_one(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute("DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
+    conn.close()
+    assert main(["migrate", "--db", str(db)]) == 1
+    out = capsys.readouterr().out
+    assert "subject_count_mismatch" in out
+
+
+def test_cli_migrate_json(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    assert main(["migrate", "--db", str(db), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["migrated"] is True
+    assert data["bytes_after"] > 0
+
+
+def test_cli_migrate_allow_unverified_migrates_tampered(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute("DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
+    conn.close()
+    exit_code = main(["migrate", "--db", str(db), "--allow-unverified"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Migrated" in out
+
+
+def test_cli_migrate_unopenable_db_exits_two(tmp_path, capsys):
+    # A directory at the db path can't be opened by sqlite3 at all -- never
+    # read, so this must report exit 2 (couldn't read it), the same as
+    # verify's equivalent case, not exit 1 (read it, found a problem).
+    unopenable = tmp_path / "not-a-db.db"
+    unopenable.mkdir()
+    exit_code = main(["migrate", "--db", str(unopenable)])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "Error: could not open database" in err
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores file permission bits, so chmod 000 wouldn't block reads",
+)
+def test_cli_migrate_permission_denied_db_exits_two(tmp_path, capsys, build_legacy):
+    # A real, valid legacy database that the process simply cannot read.
+    unreadable = tmp_path / "legacy.db"
+    build_legacy(unreadable)
+    os.chmod(unreadable, 0o000)
+    try:
+        exit_code = main(["migrate", "--db", str(unreadable)])
+    finally:
+        os.chmod(unreadable, 0o644)  # restore so tmp_path cleanup can remove it
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "Error: could not open database" in err
+
+
+def test_cli_migrate_small_db_reports_growth_accurately(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    assert main(["migrate", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "0.0 MB -> 0.0 MB" not in out
+    assert "KB" in out
+    assert "fixed overhead" in out
+
+
+def test_format_bytes_sub_kilobyte_scale():
+    """Below 1 KB, _format_bytes uses a plain byte count.
+
+    Real database sizes never land here (SQLite's minimum page size already
+    exceeds 1024 bytes), so this branch is exercised directly against the
+    pure formatting function rather than through a contrived migration.
+    """
+    from consentml.cli import _format_bytes
+
+    assert _format_bytes(500) == "500 bytes"
+
+
+def test_format_bytes_megabyte_scale():
+    from consentml.cli import _format_bytes
+
+    assert _format_bytes(2 * 1024 * 1024) == "2.0 MB"

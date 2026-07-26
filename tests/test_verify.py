@@ -49,6 +49,31 @@ def _codes(report):
     return [f.code for f in report.findings]
 
 
+def _run_pk(db, run_id):
+    """Resolve a run_id to its surrogate run_pk, for tampering with
+    subject_index directly (it references run_pk, not run_id)."""
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT run_pk FROM training_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0]
+
+
+def _subject_pk(db, subject_key):
+    """Resolve an interned subject_key to its surrogate subject_pk."""
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT subject_pk FROM subjects WHERE subject_key = ?", (subject_key,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0]
+
+
 def test_clean_log_verifies(db):
     _seed(db)
     report = verify_audit_log(db_path=db)
@@ -72,6 +97,34 @@ def test_missing_database_is_reported_not_created(db):
     assert report.n_entries == 0
     assert _codes(report) == ["missing_database"]
     assert not db.exists()
+
+
+def test_empty_file_is_reported_not_a_lineage_database_and_left_untouched(db):
+    # An empty file *exists* and SQLite opens it happily as a valid, empty
+    # database -- so it doesn't hit the missing_database check, and it's
+    # genuinely readable, not an I/O failure. But LineageStore._detect_schema
+    # treats a training_runs-less file as "provision a fresh v1 schema
+    # here," which would silently turn this into an empty-but-valid lineage
+    # database and then report ok=True.
+    db.write_bytes(b"")
+    report = verify_audit_log(db_path=db)
+    assert report.ok is False
+    assert _codes(report) == ["not_a_lineage_database"]
+    assert db.read_bytes() == b""
+
+
+def test_non_sqlite_file_raises_instead_of_reporting_not_a_lineage_database(db):
+    # Distinct from the empty-file case: this file cannot be read as a
+    # SQLite database at all -- an I/O failure, not "readable but not
+    # ours". verify_audit_log() deliberately lets this propagate (the CLI
+    # catches it and reports exit 2) rather than folding it into
+    # not_a_lineage_database, which would make "permission denied" and
+    # "directory at this path" indistinguishable from "wrong --db path".
+    junk = b"this is not a sqlite database, just plain bytes" * 5
+    db.write_bytes(junk)
+    with pytest.raises(sqlite3.DatabaseError):
+        verify_audit_log(db_path=db)
+    assert db.read_bytes() == junk
 
 
 def test_edited_payload_is_detected_without_cascade(db):
@@ -188,8 +241,10 @@ def test_oversized_integer_literal_payload_is_detected_without_raising(db):
 
 def test_deleted_subject_row_is_detected(db):
     run_ids = _seed(db, n_runs=2)
-    _sql(db, "DELETE FROM subject_index WHERE run_id = ? AND subject_id_hash = ?",
-         (run_ids[0], "s0a"))
+    run_pk = _run_pk(db, run_ids[0])
+    subject_pk = _subject_pk(db, "s0a")
+    _sql(db, "DELETE FROM subject_index WHERE run_pk = ? AND subject_pk = ?",
+         (run_pk, subject_pk))
     report = verify_audit_log(db_path=db)
     assert report.ok is False
     findings = [f for f in report.findings if f.code == "subject_count_mismatch"]
@@ -205,8 +260,10 @@ def test_deleted_subject_with_matching_n_subjects_edit_is_still_detected(db):
     catch -- it has to compare against the live subject_index COUNT(*),
     never against training_runs.n_subjects, or this attack goes silent."""
     run_ids = _seed(db, n_runs=1)
-    _sql(db, "DELETE FROM subject_index WHERE run_id = ? AND subject_id_hash = ?",
-         (run_ids[0], "s0a"))
+    run_pk = _run_pk(db, run_ids[0])
+    subject_pk = _subject_pk(db, "s0a")
+    _sql(db, "DELETE FROM subject_index WHERE run_pk = ? AND subject_pk = ?",
+         (run_pk, subject_pk))
     _sql(db, "UPDATE training_runs SET n_subjects = 1 WHERE run_id = ?", (run_ids[0],))
     report = verify_audit_log(db_path=db)
     assert "subject_count_mismatch" in _codes(report)
@@ -214,7 +271,11 @@ def test_deleted_subject_with_matching_n_subjects_edit_is_still_detected(db):
 
 def test_added_subject_row_is_detected(db):
     run_ids = _seed(db, n_runs=1)
-    _sql(db, "INSERT INTO subject_index VALUES (?, ?)", (run_ids[0], "smuggled"))
+    run_pk = _run_pk(db, run_ids[0])
+    _sql(db, "INSERT INTO subjects (subject_key) VALUES (?)", ("smuggled",))
+    subject_pk = _subject_pk(db, "smuggled")
+    _sql(db, "INSERT INTO subject_index (run_pk, subject_pk) VALUES (?, ?)",
+         (run_pk, subject_pk))
     report = verify_audit_log(db_path=db)
     assert "subject_count_mismatch" in _codes(report)
 
@@ -252,7 +313,9 @@ def test_unlogged_run_is_detected(db):
     _seed(db, n_runs=1)
     _sql(
         db,
-        "INSERT INTO training_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO training_runs (run_id, model_name, model_hash, data_source, "
+        "subject_id_col, subject_ids_hashed, n_subjects, started_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ("smuggled-run", "shadow", "h", "src", "email", 1, 0,
          "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
@@ -361,13 +424,17 @@ def test_mixed_type_unlogged_run_ids_do_not_raise(db):
     LineageStore(db_path=db).close()
     _sql(
         db,
-        "INSERT INTO training_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO training_runs (run_id, model_name, model_hash, data_source, "
+        "subject_id_col, subject_ids_hashed, n_subjects, started_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ("text-run-id", "shadow-a", "h", "src", "email", 1, 0,
          "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
     _sql(
         db,
-        "INSERT INTO training_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO training_runs (run_id, model_name, model_hash, data_source, "
+        "subject_id_col, subject_ids_hashed, n_subjects, started_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (b"\x00\x01blob-run-id", "shadow-b", "h", "src", "email", 1, 0,
          "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
@@ -535,3 +602,15 @@ def test_public_api_exports_verify():
 
     assert consentml.verify_audit_log is verify_audit_log
     assert consentml.VerificationReport is VerificationReport
+
+
+def test_verify_works_on_a_legacy_database(legacy_db):
+    report = verify_audit_log(db_path=legacy_db)
+    assert report.ok is True
+    assert report.n_entries == 2
+
+
+def test_verify_detects_tampering_in_a_legacy_database(legacy_db):
+    _sql(legacy_db, "DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
+    report = verify_audit_log(db_path=legacy_db)
+    assert "subject_count_mismatch" in _codes(report)

@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+from consentml.errors import ConsentMLError
 from consentml.store import LineageStore, default_db_path
 
 
@@ -37,14 +38,23 @@ def test_creates_parent_directory(tmp_path):
 
 
 def test_subject_index_is_indexed(store, tmp_path):
+    """subject_index must be indexed for subject lookups. Assert the intent
+    (an index covering subject_pk exists) rather than a literal index name,
+    so this doesn't break again the next time an index is renamed."""
     conn = sqlite3.connect(tmp_path / "lineage.db")
     try:
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
+        index_names = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='subject_index'"
         ).fetchall()
+        indexed_columns = set()
+        for (name,) in index_names:
+            indexed_columns.update(
+                row[2] for row in conn.execute(f"PRAGMA index_info({name})")
+            )
     finally:
         conn.close()
-    assert "idx_subject_id_hash" in {r[0] for r in rows}
+    assert "subject_pk" in indexed_columns
 
 
 def test_init_is_idempotent(tmp_path):
@@ -193,3 +203,80 @@ def test_all_run_ids(store):
 
 def test_all_run_ids_empty(store):
     assert store.all_run_ids() == set()
+
+
+def test_fresh_database_is_schema_v1(store, tmp_path):
+    assert store.schema_version == 1
+    conn = sqlite3.connect(tmp_path / "lineage.db")
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_fresh_database_has_subjects_table(store, tmp_path):
+    assert "subjects" in _table_names(tmp_path / "lineage.db")
+
+
+def test_subject_keys_are_stored_once_across_runs(store, tmp_path):
+    _record_sample_run(store, model_name="a", subject_hashes=("h1", "h2"))
+    _record_sample_run(store, model_name="b", subject_hashes=("h1", "h2"))
+    conn = sqlite3.connect(tmp_path / "lineage.db")
+    try:
+        n_subjects = conn.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
+        n_index = conn.execute("SELECT COUNT(*) FROM subject_index").fetchone()[0]
+    finally:
+        conn.close()
+    assert n_subjects == 2   # deduplicated
+    assert n_index == 4      # one row per (run, subject), NOT deduplicated
+
+
+def test_lookup_still_works_after_interning(store):
+    run_id = _record_sample_run(store)
+    runs = store.runs_for_subject_value("h1")
+    assert [r["run_id"] for r in runs] == [run_id]
+    assert runs[0]["model_name"] == "churn_v3"
+
+
+def test_subject_count_for_run_after_interning(store):
+    run_id = _record_sample_run(store, subject_hashes=("h1", "h2", "h3"))
+    assert store.subject_count_for_run(run_id) == 3
+
+
+def test_legacy_database_reports_version_zero(legacy_db):
+    s = LineageStore(db_path=legacy_db)
+    try:
+        assert s.schema_version == 0
+    finally:
+        s.close()
+
+
+def test_legacy_database_is_not_modified_on_open(legacy_db):
+    before = legacy_db.read_bytes()
+    LineageStore(db_path=legacy_db).close()
+    assert legacy_db.read_bytes() == before
+
+
+def test_legacy_reads_work(legacy_db):
+    s = LineageStore(db_path=legacy_db)
+    try:
+        runs = s.runs_for_subject_value("h1")
+        assert [r["model_name"] for r in runs] == ["churn_v3", "upsell"]
+        assert s.subject_count_for_run("run-0") == 2
+        assert s.all_run_ids() == {"run-0", "run-1"}
+        assert s.run_by_id("run-0")["model_name"] == "churn_v3"
+    finally:
+        s.close()
+
+
+def test_legacy_writes_are_refused(legacy_db):
+    s = LineageStore(db_path=legacy_db)
+    try:
+        with pytest.raises(ConsentMLError, match="consentml migrate"):
+            _record_sample_run(s)
+        with pytest.raises(ConsentMLError, match="consentml migrate"):
+            s.record_revocation(
+                subject_key="k", n_affected_runs=0, recommended_actions=[]
+            )
+    finally:
+        s.close()

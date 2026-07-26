@@ -1,9 +1,13 @@
 """SQLite-backed lineage store.
 
-Three tables:
+Four tables:
 - training_runs: one row per decorated training execution.
-- subject_index: one row per (run, subject) pair; indexed for revocation lookups.
+- subjects: each distinct subject key, stored once.
+- subject_index: one row per (run, subject) pair, by integer foreign key.
 - audit_log: append-only, hash-chained event log.
+
+Schema version lives in PRAGMA user_version. Version 0 databases predate
+versioning; they can be read but not written -- see consentml.migrate.
 """
 
 import hashlib
@@ -14,7 +18,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from consentml.errors import ConsentMLError
+
 GENESIS_HASH = "0" * 64
+SCHEMA_VERSION = 1
 
 _RUN_COLS = [
     "run_id", "model_name", "model_hash", "data_source",
@@ -24,7 +31,8 @@ _RUN_COLS = [
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_runs (
-    run_id TEXT PRIMARY KEY,
+    run_pk INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
     model_name TEXT NOT NULL,
     model_hash TEXT NOT NULL,
     data_source TEXT NOT NULL,
@@ -35,13 +43,27 @@ CREATE TABLE IF NOT EXISTS training_runs (
     finished_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS subject_index (
-    run_id TEXT NOT NULL REFERENCES training_runs(run_id),
-    subject_id_hash TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS subjects (
+    subject_pk INTEGER PRIMARY KEY,
+    subject_key TEXT NOT NULL UNIQUE
 );
 
-CREATE INDEX IF NOT EXISTS idx_subject_id_hash
-    ON subject_index(subject_id_hash);
+CREATE TABLE IF NOT EXISTS subject_index (
+    run_pk INTEGER NOT NULL REFERENCES training_runs(run_pk),
+    subject_pk INTEGER NOT NULL REFERENCES subjects(subject_pk)
+);
+
+-- Two indexes, not one: idx_si_subject serves revocation lookups
+-- (runs_for_subject_value joins subjects -> subject_index), idx_si_run
+-- serves subject_count_for_run, which verify_audit_log() calls once per
+-- training run. Dropping either turns its query into a full scan of
+-- subject_index -- fine at test scale, catastrophic on the
+-- many-runs/many-subjects databases this schema exists for. The extra
+-- index does eat into the storage savings from interning; that's a
+-- deliberate trade of some dedup win for verification staying fast at
+-- scale, not an oversight.
+CREATE INDEX IF NOT EXISTS idx_si_subject ON subject_index(subject_pk);
+CREATE INDEX IF NOT EXISTS idx_si_run ON subject_index(run_pk);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,8 +89,34 @@ class LineageStore:
         self.db_path = Path(db_path) if db_path is not None else default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
+        self.schema_version = self._detect_schema()
+
+    def _detect_schema(self) -> int:
+        """Return the schema version, creating a fresh v1 database if needed.
+
+        A legacy database and an empty file both report user_version 0 -- the
+        old code never set it -- so the presence of training_runs is what tells
+        them apart. The schema script must never run against a legacy database.
+        """
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version:
+            return version
+        existing = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='training_runs'"
+        ).fetchone()
+        if existing:
+            return 0
         self._conn.executescript(_SCHEMA)
+        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
+        return SCHEMA_VERSION
+
+    def _require_writable(self):
+        if self.schema_version < SCHEMA_VERSION:
+            raise ConsentMLError(
+                f"{self.db_path} uses schema v{self.schema_version}; run "
+                "'consentml migrate' to upgrade it before recording new events."
+            )
 
     def close(self):
         self._conn.close()
@@ -87,10 +135,13 @@ class LineageStore:
     ) -> str:
         """Record one training run, its subject index rows, and an audit
         entry, in a single transaction. Returns the new run_id."""
+        self._require_writable()
         run_id = str(uuid.uuid4())
         with self._conn:
-            self._conn.execute(
-                "INSERT INTO training_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            cursor = self._conn.execute(
+                "INSERT INTO training_runs (run_id, model_name, model_hash, "
+                "data_source, subject_id_col, subject_ids_hashed, n_subjects, "
+                "started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     model_name,
@@ -103,9 +154,15 @@ class LineageStore:
                     finished_at,
                 ),
             )
+            run_pk = cursor.lastrowid
             self._conn.executemany(
-                "INSERT INTO subject_index VALUES (?, ?)",
-                [(run_id, v) for v in subject_id_values],
+                "INSERT OR IGNORE INTO subjects (subject_key) VALUES (?)",
+                [(v,) for v in subject_id_values],
+            )
+            self._conn.executemany(
+                "INSERT INTO subject_index (run_pk, subject_pk) "
+                "SELECT ?, subject_pk FROM subjects WHERE subject_key = ?",
+                [(run_pk, v) for v in subject_id_values],
             )
             self._append_audit_entry(
                 event_type="training_run",
@@ -125,18 +182,21 @@ class LineageStore:
     def runs_for_subject_value(self, subject_id_value) -> list[dict]:
         """Training runs whose subject index contains the given stored value
         (a hash when subject_ids_hashed, else the raw ID)."""
-        rows = self._conn.execute(
-            """
-            SELECT r.run_id, r.model_name, r.model_hash, r.data_source,
-                   r.subject_id_col, r.subject_ids_hashed, r.n_subjects,
-                   r.started_at, r.finished_at
-            FROM training_runs r
-            JOIN subject_index s ON s.run_id = r.run_id
-            WHERE s.subject_id_hash = ?
-            ORDER BY r.started_at
-            """,
-            (subject_id_value,),
-        ).fetchall()
+        cols = ", ".join(f"r.{c}" for c in _RUN_COLS)
+        if self.schema_version == 0:
+            sql = (
+                f"SELECT {cols} FROM training_runs r "
+                "JOIN subject_index s ON s.run_id = r.run_id "
+                "WHERE s.subject_id_hash = ? ORDER BY r.started_at"
+            )
+        else:
+            sql = (
+                f"SELECT {cols} FROM training_runs r "
+                "JOIN subject_index s ON s.run_pk = r.run_pk "
+                "JOIN subjects sub ON sub.subject_pk = s.subject_pk "
+                "WHERE sub.subject_key = ? ORDER BY r.started_at"
+            )
+        rows = self._conn.execute(sql, (subject_id_value,)).fetchall()
         return [dict(zip(_RUN_COLS, row)) for row in rows]
 
     def latest_run_for_model(self, model_name) -> dict | None:
@@ -158,9 +218,15 @@ class LineageStore:
 
     def subject_count_for_run(self, run_id) -> int:
         """How many subject_index rows currently exist for this run."""
-        return self._conn.execute(
-            "SELECT COUNT(*) FROM subject_index WHERE run_id = ?", (run_id,)
-        ).fetchone()[0]
+        if self.schema_version == 0:
+            sql = "SELECT COUNT(*) FROM subject_index WHERE run_id = ?"
+        else:
+            sql = (
+                "SELECT COUNT(*) FROM subject_index s "
+                "JOIN training_runs r ON r.run_pk = s.run_pk "
+                "WHERE r.run_id = ?"
+            )
+        return self._conn.execute(sql, (run_id,)).fetchone()[0]
 
     def all_run_ids(self) -> set:
         """Every run id present in training_runs."""
@@ -171,6 +237,7 @@ class LineageStore:
         """Append a revocation event to the audit log. Returns the entry id.
 
         The payload carries only the hashed subject key, never a raw ID."""
+        self._require_writable()
         with self._conn:
             return self._append_audit_entry(
                 event_type="revocation",
