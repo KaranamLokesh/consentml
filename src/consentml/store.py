@@ -32,17 +32,21 @@ _RUN_COLS = [
 
 # Schema versions before 2 (both v0 and v1) predate the provenance column --
 # their training_runs table still has data_source and subject_id_col, not
-# provenance. Aliasing data_source AS provenance (and dropping
-# subject_id_col) lets every read path return the same _RUN_COLS shape
-# regardless of which on-disk schema version it's reading, so
-# dict(zip(_RUN_COLS, row)) below stays correct for legacy databases too,
-# without a parallel set of query strings for every caller. This is purely
-# about column *names* -- v1's subject_index is already the interned
-# run_pk/subject_pk layout, identical to v2's, so it must not be confused
-# with the v0-only join shape handled separately below.
+# provenance. Selecting data_source AS provenance gives the query the same
+# column count and order as _RUN_COLS; the "provenance" key itself comes
+# from dict(zip(_RUN_COLS, row)) below matching row values positionally --
+# the SQL alias is purely for readability and plays no part in that.
+#
+# The value that lands under "provenance" for a legacy row is therefore old
+# free text (e.g. "postgres://prod/customers"), not JSON. Anything that
+# parses provenance as JSON must tolerate a bare string here until a
+# migration backfills these rows into the structured form.
+#
+# Derived from _RUN_COLS rather than hand-repeated: a column added to one
+# list and not the other would otherwise make dict(zip(...)) below truncate
+# silently instead of raising, on the first divergence in list length.
 _RUN_COLS_LEGACY = [
-    "run_id", "model_name", "model_hash", "data_source AS provenance",
-    "subject_ids_hashed", "n_subjects", "started_at", "finished_at",
+    "data_source AS provenance" if c == "provenance" else c for c in _RUN_COLS
 ]
 
 _SCHEMA = """
@@ -115,7 +119,10 @@ def provenance_hash(text) -> str | None:
     Returns None rather than raising for non-str input: the value comes
     straight out of a database column an attacker may have replaced with a
     BLOB or an integer, and verify_audit_log() must never raise on hostile
-    database contents. A None here reports as provenance_modified.
+    database contents. A later task wires this into verify_audit_log(),
+    where a None here is expected to report as a provenance_modified
+    finding; no such finding code exists yet, and no production path in
+    this commit reaches this branch.
     """
     if not isinstance(text, str):
         return None
@@ -216,15 +223,24 @@ class LineageStore:
             )
         return run_id
 
+    def _run_cols(self) -> list:
+        """Column list for reading training_runs.
+
+        Legacy names (_RUN_COLS_LEGACY) below SCHEMA_VERSION -- i.e. for
+        both v0 and v1 -- else the current _RUN_COLS. This is purely a
+        column-*name* concern, distinct from subject_index's join shape:
+        v1's subject_index is already the interned run_pk/subject_pk layout
+        v2 uses, so callers must keep gating the join shape on
+        schema_version == 0 specifically, never on this same condition --
+        that conflation is exactly how v1 databases ended up raising
+        OperationalError on every read the first time this was written.
+        """
+        return _RUN_COLS_LEGACY if self.schema_version < SCHEMA_VERSION else _RUN_COLS
+
     def runs_for_subject_value(self, subject_id_value) -> list[dict]:
         """Training runs whose subject index contains the given stored value
         (a hash when subject_ids_hashed, else the raw ID)."""
-        # Column names: legacy (data_source/subject_id_col) below SCHEMA_VERSION,
-        # i.e. v0 and v1 both. Join shape: v0 only -- v1's subject_index is
-        # already the interned run_pk/subject_pk layout used by v2. These two
-        # facts don't share a condition, so they're branched separately.
-        run_cols = _RUN_COLS_LEGACY if self.schema_version < SCHEMA_VERSION else _RUN_COLS
-        cols = ", ".join(f"r.{c}" for c in run_cols)
+        cols = ", ".join(f"r.{c}" for c in self._run_cols())
         if self.schema_version == 0:
             sql = (
                 f"SELECT {cols} FROM training_runs r "
@@ -243,8 +259,7 @@ class LineageStore:
 
     def latest_run_for_model(self, model_name) -> dict | None:
         """The most recent training run (by started_at) for a model name."""
-        run_cols = _RUN_COLS_LEGACY if self.schema_version < SCHEMA_VERSION else _RUN_COLS
-        cols = ", ".join(run_cols)
+        cols = ", ".join(self._run_cols())
         row = self._conn.execute(
             f"SELECT {cols} FROM training_runs "
             "WHERE model_name = ? ORDER BY started_at DESC LIMIT 1",
@@ -254,8 +269,7 @@ class LineageStore:
 
     def run_by_id(self, run_id) -> dict | None:
         """The training run with this id, or None if it is absent."""
-        run_cols = _RUN_COLS_LEGACY if self.schema_version < SCHEMA_VERSION else _RUN_COLS
-        cols = ", ".join(run_cols)
+        cols = ", ".join(self._run_cols())
         row = self._conn.execute(
             f"SELECT {cols} FROM training_runs WHERE run_id = ?",
             (run_id,),

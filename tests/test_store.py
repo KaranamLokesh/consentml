@@ -265,6 +265,10 @@ def test_legacy_reads_work(legacy_db):
         assert s.subject_count_for_run("run-0") == 2
         assert s.all_run_ids() == {"run-0", "run-1"}
         assert s.run_by_id("run-0")["model_name"] == "churn_v3"
+        # A v0 row's "provenance" is the old free-text data_source value,
+        # not JSON -- pinned here so a future change can't quietly make this
+        # look like structured provenance when it isn't.
+        assert s.run_by_id("run-0")["provenance"] == "postgres://prod/customers"
     finally:
         s.close()
 
@@ -392,6 +396,10 @@ def test_v1_database_reads_work(tmp_path):
     s = LineageStore(db_path=path)
     try:
         assert s.run_by_id(run_id)["model_name"] == "churn_v3"
+        # A v1 row's "provenance" is the old free-text data_source value,
+        # not JSON -- same as v0, pinned here so a future _parse_provenance
+        # can't be written assuming every stored value is JSON.
+        assert s.run_by_id(run_id)["provenance"] == "postgres://prod/customers"
         assert s.latest_run_for_model("churn_v3")["run_id"] == run_id
         assert [r["run_id"] for r in s.runs_for_subject_value("h1")] == [run_id]
         assert s.subject_count_for_run(run_id) == 2
@@ -442,6 +450,15 @@ def test_provenance_is_stored_as_sorted_json(tmp_path):
     }
     assert stored == json.dumps(json.loads(stored), sort_keys=True)
     store.close()
+
+
+def test_provenance_hash_is_stable_across_key_order():
+    """sort_keys in provenance_text is what makes provenance_hash a function
+    of *content*, not of the dict's insertion order. Without it, the same
+    logical provenance recorded with keys in a different order would hash
+    differently and every re-record would look like tampering."""
+    assert provenance_hash(provenance_text({"kind": "x", "label": "y"})) == \
+        provenance_hash(provenance_text({"label": "y", "kind": "x"}))
 
 
 def test_audit_payload_carries_provenance_sha256_not_data_source(tmp_path):

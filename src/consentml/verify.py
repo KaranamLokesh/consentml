@@ -324,8 +324,8 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
         # file that plainly exists would go looking in the wrong place.
         # Checked with a strictly read-only connection, before
         # LineageStore ever touches the path, because LineageStore would
-        # provision a fresh empty v1 schema onto exactly this kind of file
-        # and then report a clean bill of health for it.
+        # provision a fresh empty current-version schema onto exactly this
+        # kind of file and then report a clean bill of health for it.
         return VerificationReport(
             ok=False,
             n_entries=0,

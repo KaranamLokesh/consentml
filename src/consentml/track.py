@@ -61,7 +61,7 @@ def track(*, data_source, subject_id_col, model_name, hash_subject_ids=True, db_
                         "kind": "dataframe",
                         "label": data_source,
                         "subject_id_col": subject_id_col,
-                        "n_rows": int(len(df)),
+                        "n_rows": len(df),
                     },
                     subject_ids_hashed=hash_subject_ids,
                     subject_id_values=subject_values,
