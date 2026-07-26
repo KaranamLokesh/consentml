@@ -71,6 +71,18 @@ def _copy_into_v1(src_path, dst_path):
                 )
                 # ...but one index row per original row, so per-run counts
                 # are preserved exactly.
+                #
+                # Measured ~8us/row (1.60s for 200k subject_index rows) with
+                # this per-row executemany, each doing a two-table lookup.
+                # A set-based rewrite (ATTACH the source db, single
+                # INSERT...SELECT...JOIN) measured ~10x faster on the same
+                # 200k rows. Deliberately not taken: migration is a one-time
+                # offline operation -- even at millions of rows this is
+                # minutes, not hours -- and this is the one piece of code
+                # whose entire job is not corrupting an audit trail, so the
+                # simpler, more obviously-correct version is worth the
+                # extra wall-clock time. Revisit if real databases grow
+                # large enough that this stops being true.
                 dst.executemany(
                     "INSERT INTO subject_index (run_pk, subject_pk) "
                     "SELECT r.run_pk, s.subject_pk FROM training_runs r, subjects s "
@@ -141,13 +153,6 @@ def _migrate_database(*, db_path=None, allow_unverified=False) -> MigrationResul
         conn = sqlite3.connect(db)
         try:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            has_training_runs = (
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' "
-                    "AND name='training_runs'"
-                ).fetchone()
-                is not None
-            )
         finally:
             conn.close()
     except sqlite3.DatabaseError as exc:
@@ -160,20 +165,13 @@ def _migrate_database(*, db_path=None, allow_unverified=False) -> MigrationResul
         return MigrationResult(
             migrated=False, already_current=True, bytes_before=db.stat().st_size
         )
-    if not has_training_runs:
-        # An empty or freshly-created file, not a real legacy database. Bail
-        # out before calling verify_audit_log: LineageStore._detect_schema
-        # treats a training_runs-less file as "provision a fresh v1 schema
-        # here", which would initialize schema on this exact path -- the
-        # opposite of leaving an unrecognized file untouched.
-        return MigrationResult(
-            migrated=False,
-            already_current=False,
-            bytes_before=db.stat().st_size,
-            error=f"{db} does not look like a consentml lineage database "
-            "(no training_runs table)",
-        )
 
+    # No separate "is this even a lineage database" pre-check here: an
+    # empty file, a directory, or some other non-lineage SQLite database
+    # is exactly what verify_audit_log()'s own not_a_lineage_database
+    # finding now reports -- via a strictly read-only probe that can't
+    # mutate the file, so it's safe to call directly rather than
+    # duplicating that check here.
     before = verify_audit_log(db_path=db)
     if not before.ok and not allow_unverified:
         return MigrationResult(

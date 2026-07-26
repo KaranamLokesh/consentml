@@ -119,12 +119,15 @@ def test_cli_verify_missing_db_exits_nonzero(tmp_path, capsys):
     assert not missing.exists()
 
 
-def test_cli_verify_unopenable_db_exits_two(tmp_path, capsys):
-    # A directory at the db path can't be opened by sqlite3 at all, so this
-    # never gets far enough to see "no database" -- it's a harder failure.
+def test_cli_verify_unopenable_db_reports_not_a_lineage_database(tmp_path, capsys):
+    # A directory at the db path can't be opened by sqlite3 at all. Older
+    # behavior let this raise out of verify_audit_log and land in the CLI's
+    # generic "could not open database" handler (exit 2) -- but
+    # verify_audit_log() must never raise, so this is now a normal, reported
+    # verification failure (exit 1) like any other bad path.
     unopenable = tmp_path / "not-a-db.db"
     unopenable.mkdir()
     exit_code = main(["verify", "--db", str(unopenable)])
-    assert exit_code == 2
-    err = capsys.readouterr().err
-    assert "Error: could not open database" in err
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "not_a_lineage_database" in out

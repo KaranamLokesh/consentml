@@ -99,6 +99,27 @@ def test_missing_database_is_reported_not_created(db):
     assert not db.exists()
 
 
+def test_empty_file_is_reported_not_a_lineage_database_and_left_untouched(db):
+    # An empty file *exists*, so it doesn't hit the missing_database check --
+    # but LineageStore._detect_schema treats a training_runs-less file as
+    # "provision a fresh v1 schema here," which would silently turn this
+    # into an empty-but-valid lineage database and then report ok=True.
+    db.write_bytes(b"")
+    report = verify_audit_log(db_path=db)
+    assert report.ok is False
+    assert _codes(report) == ["not_a_lineage_database"]
+    assert db.read_bytes() == b""
+
+
+def test_non_sqlite_file_is_reported_not_a_lineage_database_and_left_untouched(db):
+    junk = b"this is not a sqlite database, just plain bytes" * 5
+    db.write_bytes(junk)
+    report = verify_audit_log(db_path=db)
+    assert report.ok is False
+    assert _codes(report) == ["not_a_lineage_database"]
+    assert db.read_bytes() == junk
+
+
 def test_edited_payload_is_detected_without_cascade(db):
     _seed(db, n_runs=5)
     _sql(db, "UPDATE audit_log SET payload = ? WHERE id = 3", ('{"run_id": "x"}',))
