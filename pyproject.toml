@@ -12,7 +12,15 @@ requires-python = ">=3.10"
 dependencies = ["pandas>=2.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-cov", "scikit-learn"]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "scikit-learn",
+    # Used by tests/test_notebook.py to execute the demo notebook.
+    "nbclient",
+    "nbformat",
+    "ipykernel",
+]
 
 [project.scripts]
 consentml = "consentml.cli:main"
