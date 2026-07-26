@@ -574,3 +574,15 @@ def test_public_api_exports_verify():
 
     assert consentml.verify_audit_log is verify_audit_log
     assert consentml.VerificationReport is VerificationReport
+
+
+def test_verify_works_on_a_legacy_database(legacy_db):
+    report = verify_audit_log(db_path=legacy_db)
+    assert report.ok is True
+    assert report.n_entries == 2
+
+
+def test_verify_detects_tampering_in_a_legacy_database(legacy_db):
+    _sql(legacy_db, "DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
+    report = verify_audit_log(db_path=legacy_db)
+    assert "subject_count_mismatch" in _codes(report)

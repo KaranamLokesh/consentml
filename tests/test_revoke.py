@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from consentml.errors import ConsentMLError
 from consentml.hashing import hash_subject_id
 from consentml.revoke import AffectedModelsReport, revoke
 from consentml.store import LineageStore
@@ -107,3 +108,14 @@ def test_public_api_exports_revoke():
 
     assert consentml.revoke is revoke
     assert consentml.AffectedModelsReport is AffectedModelsReport
+
+
+def test_revoke_dry_run_works_on_legacy_database(legacy_db):
+    report = revoke(subject_id="h1", db_path=legacy_db, dry_run=True)
+    assert [m.model_name for m in report.affected_models] == ["churn_v3", "upsell"]
+    assert report.audit_log_entry_id is None
+
+
+def test_revoke_recording_is_refused_on_legacy_database(legacy_db):
+    with pytest.raises(ConsentMLError, match="consentml migrate"):
+        revoke(subject_id="h1", db_path=legacy_db)

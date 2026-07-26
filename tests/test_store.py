@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+from consentml.errors import ConsentMLError
 from consentml.store import LineageStore, default_db_path
 
 
@@ -240,3 +241,42 @@ def test_lookup_still_works_after_interning(store):
 def test_subject_count_for_run_after_interning(store):
     run_id = _record_sample_run(store, subject_hashes=("h1", "h2", "h3"))
     assert store.subject_count_for_run(run_id) == 3
+
+
+def test_legacy_database_reports_version_zero(legacy_db):
+    s = LineageStore(db_path=legacy_db)
+    try:
+        assert s.schema_version == 0
+    finally:
+        s.close()
+
+
+def test_legacy_database_is_not_modified_on_open(legacy_db):
+    before = legacy_db.read_bytes()
+    LineageStore(db_path=legacy_db).close()
+    assert legacy_db.read_bytes() == before
+
+
+def test_legacy_reads_work(legacy_db):
+    s = LineageStore(db_path=legacy_db)
+    try:
+        runs = s.runs_for_subject_value("h1")
+        assert [r["model_name"] for r in runs] == ["churn_v3", "upsell"]
+        assert s.subject_count_for_run("run-0") == 2
+        assert s.all_run_ids() == {"run-0", "run-1"}
+        assert s.run_by_id("run-0")["model_name"] == "churn_v3"
+    finally:
+        s.close()
+
+
+def test_legacy_writes_are_refused(legacy_db):
+    s = LineageStore(db_path=legacy_db)
+    try:
+        with pytest.raises(ConsentMLError, match="consentml migrate"):
+            _record_sample_run(s)
+        with pytest.raises(ConsentMLError, match="consentml migrate"):
+            s.record_revocation(
+                subject_key="k", n_affected_runs=0, recommended_actions=[]
+            )
+    finally:
+        s.close()
