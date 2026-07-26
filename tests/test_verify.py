@@ -612,3 +612,110 @@ def test_verify_detects_tampering_in_a_legacy_database(legacy_db):
     _sql(legacy_db, "DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
     report = verify_audit_log(db_path=legacy_db)
     assert "subject_count_mismatch" in _codes(report)
+
+
+def _one_run(db_path, provenance=None):
+    store = LineageStore(db_path=db_path)
+    store.record_training_run(
+        model_name="m",
+        model_hash="mh",
+        provenance=provenance or {"kind": "dataframe", "label": "x", "n_rows": 1},
+        subject_ids_hashed=True,
+        subject_id_values=["a"],
+        started_at="t0",
+        finished_at="t1",
+    )
+    store.close()
+
+
+def test_editing_provenance_is_detected(tmp_path):
+    db = tmp_path / "l.db"
+    _one_run(db)
+    assert verify_audit_log(db_path=db).ok
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE training_runs SET provenance = ?",
+        (json.dumps({"kind": "dataframe", "label": "somewhere-else", "n_rows": 1},
+                    sort_keys=True),),
+    )
+    conn.commit()
+    conn.close()
+
+    report = verify_audit_log(db_path=db)
+    assert not report.ok
+    assert [f.code for f in report.findings] == ["provenance_modified"]
+
+
+def test_provenance_replaced_with_a_blob_is_detected_not_raised(tmp_path):
+    db = tmp_path / "l.db"
+    _one_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE training_runs SET provenance = ?", (b"\xff\xfe",))
+    conn.commit()
+    conn.close()
+
+    report = verify_audit_log(db_path=db)
+    assert [f.code for f in report.findings] == ["provenance_modified"]
+
+
+def test_clean_v2_database_reports_no_legacy_runs(tmp_path):
+    db = tmp_path / "l.db"
+    _one_run(db)
+    report = verify_audit_log(db_path=db)
+    assert report.ok
+    assert report.n_legacy_runs == 0
+    assert report.to_dict()["n_legacy_runs"] == 0
+
+
+def test_legacy_payload_in_a_v2_database_is_counted_not_checked(tmp_path):
+    """A single audit log can legitimately hold a MIX of payload shapes once
+    migration backfills old entries alongside new ones: pre-v2 entries carry
+    data_source, post-v2 entries carry provenance_sha256. This builds that
+    mix directly (there's no public API path to produce it yet) and checks
+    the legacy entry is counted, not silently treated as verified."""
+    db = tmp_path / "l.db"
+    store = LineageStore(db_path=db)
+    run_id = store.record_training_run(
+        model_name="m",
+        model_hash="mh",
+        provenance={"kind": "dataframe", "label": "x", "n_rows": 1},
+        subject_ids_hashed=True,
+        subject_id_values=["a"],
+        started_at="t0",
+        finished_at="t1",
+    )
+    store.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT entry_hash FROM audit_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        prev_hash = row[0]
+        timestamp = "2026-01-01T00:00:00+00:00"
+        payload = json.dumps(
+            {
+                "run_id": run_id,
+                "model_name": "m",
+                "model_hash": "mh",
+                "data_source": "postgres://prod/customers",
+                "n_subjects": 1,
+            },
+            sort_keys=True,
+        )
+        entry_hash = hashlib.sha256(
+            (prev_hash + timestamp + "training_run" + payload).encode("utf-8")
+        ).hexdigest()
+        conn.execute(
+            "INSERT INTO audit_log (timestamp, event_type, payload, prev_hash, "
+            "entry_hash) VALUES (?, ?, ?, ?, ?)",
+            (timestamp, "training_run", payload, prev_hash, entry_hash),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = verify_audit_log(db_path=db)
+    assert report.n_legacy_runs == 1
+    assert report.ok

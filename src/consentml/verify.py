@@ -16,7 +16,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from consentml.store import GENESIS_HASH, LineageStore, default_db_path
+from consentml.store import (
+    GENESIS_HASH,
+    LineageStore,
+    default_db_path,
+    provenance_hash,
+)
 
 _REQUIRED_KEYS = {
     "training_run": {"run_id", "model_name", "model_hash", "n_subjects"},
@@ -38,6 +43,7 @@ class VerificationReport:
     head_hash: str
     findings: list
     generated_at: str
+    n_legacy_runs: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +52,7 @@ class VerificationReport:
             "head_hash": self.head_hash,
             "findings": [asdict(f) for f in self.findings],
             "generated_at": self.generated_at,
+            "n_legacy_runs": self.n_legacy_runs,
         }
 
 
@@ -137,15 +144,21 @@ def _parse_payloads(entries) -> tuple[dict, list]:
     return parsed, findings
 
 
-def _check_references(entries, parsed, store) -> list:
+def _check_references(entries, parsed, store) -> tuple[list, int]:
     """Compare training_run entries against the live tables.
 
     Revocation entries are deliberately not cross-checked: their
     n_affected_runs was point-in-time and legitimately differs once later
     runs are recorded.
+
+    Returns (findings, n_legacy_runs). A legacy run is one whose audit payload
+    predates provenance hashing -- its provenance was backfilled by migration
+    and is NOT hash-protected, so it is counted and reported rather than
+    silently passing as if it had been checked.
     """
     findings = []
     logged_run_ids = set()
+    n_legacy = 0
     for entry in entries:
         if entry["event_type"] != "training_run":
             continue
@@ -230,6 +243,25 @@ def _check_references(entries, parsed, store) -> list:
                     )
                 )
 
+        if "provenance_sha256" in payload:
+            if provenance_hash(run["provenance"]) != payload["provenance_sha256"]:
+                findings.append(
+                    VerificationFinding(
+                        entry_id=entry["id"],
+                        code="provenance_modified",
+                        detail=(
+                            f"run {run_id}: provenance in training_runs does "
+                            "not match the hash recorded in the audit log"
+                        ),
+                    )
+                )
+        else:
+            # Pre-v2 entry: its payload was hashed before provenance existed
+            # and must never be rewritten (see migrate.py), so there is
+            # nothing to check it against. Counted so the report can say so
+            # rather than implying it verified something it did not.
+            n_legacy += 1
+
     # sorted() on raw run_id values would raise TypeError if training_runs
     # ever holds a mix of types (e.g. a BLOB run_id alongside normal TEXT
     # ones) -- sort by string representation so ordering stays deterministic
@@ -244,7 +276,7 @@ def _check_references(entries, parsed, store) -> list:
                 ),
             )
         )
-    return findings
+    return findings, n_legacy
 
 
 def _is_lineage_database(db) -> bool:
@@ -344,7 +376,8 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
         entries = store.audit_entries()
         parsed, findings = _parse_payloads(entries)
         findings += _check_chain(entries)
-        findings += _check_references(entries, parsed, store)
+        reference_findings, n_legacy = _check_references(entries, parsed, store)
+        findings += reference_findings
         head_hash = entries[-1]["entry_hash"] if entries else GENESIS_HASH
         if expected_head is not None:
             # expected_head is caller-supplied and may be any type, including
@@ -373,6 +406,7 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
             head_hash=head_hash,
             findings=findings,
             generated_at=datetime.now(timezone.utc).isoformat(),
+            n_legacy_runs=n_legacy,
         )
     finally:
         store.close()

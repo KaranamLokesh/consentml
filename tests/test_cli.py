@@ -110,6 +110,17 @@ def test_cli_revoke_still_exits_zero(seeded_db, capsys):
     assert main(["revoke", "--subject-id", "a@x.com", "--db", str(seeded_db)]) == 0
 
 
+def test_cli_verify_notes_legacy_runs(legacy_db, capsys):
+    # legacy_db (see conftest.py) is a schema-v0 database whose audit
+    # payloads predate provenance hashing entirely, so verifying it must
+    # surface the note rather than silently reporting a clean bill of
+    # health for provenance it never checked.
+    exit_code = main(["verify", "--db", str(legacy_db)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "predate provenance hashing" in out
+
+
 def test_cli_verify_missing_db_exits_nonzero(tmp_path, capsys):
     missing = tmp_path / "does-not-exist.db"
     exit_code = main(["verify", "--db", str(missing)])
