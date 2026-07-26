@@ -12,6 +12,7 @@ import json
 import sqlite3
 import sys
 
+from consentml.migrate import migrate_database
 from consentml.revoke import revoke
 from consentml.verify import verify_audit_log
 
@@ -44,6 +45,24 @@ def _print_verify_summary(report):
             where = f"entry {f.entry_id}" if f.entry_id is not None else "tables"
             print(f"  - [{f.code}] {where}: {f.detail}")
     print(f"head: {report.head_hash}")
+
+
+def _print_migrate_summary(result):
+    if result.already_current:
+        print("Database is already on the current schema; nothing to do.")
+        return
+    if not result.migrated:
+        print(f"Migration refused: {result.error}")
+        for f in result.findings:
+            where = f"entry {f.entry_id}" if f.entry_id is not None else "tables"
+            print(f"  - [{f.code}] {where}: {f.detail}")
+        return
+    saved = result.bytes_before - result.bytes_after
+    print(
+        f"Migrated: {result.bytes_before / 1e6:.1f} MB -> "
+        f"{result.bytes_after / 1e6:.1f} MB ({saved / 1e6:+.1f} MB)."
+    )
+    print(f"Original kept at {result.backup_path}")
 
 
 def main(argv=None) -> int:
@@ -84,12 +103,31 @@ def main(argv=None) -> int:
         "--json", dest="as_json", action="store_true", help="Emit JSON"
     )
 
+    p_migrate = sub.add_parser(
+        "migrate", help="Upgrade a lineage database to the current schema"
+    )
+    p_migrate.add_argument(
+        "--db", default=None, help="Lineage DB path (default: ~/.consentml/lineage.db)"
+    )
+    p_migrate.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="Migrate even if the database fails verification (not recommended)",
+    )
+    p_migrate.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emit JSON"
+    )
+
     args = parser.parse_args(argv)
 
     try:
         if args.command == "verify":
             report = verify_audit_log(
                 db_path=args.db, expected_head=args.expected_head
+            )
+        elif args.command == "migrate":
+            report = migrate_database(
+                db_path=args.db, allow_unverified=args.allow_unverified
             )
         else:
             report = revoke(
@@ -105,6 +143,13 @@ def main(argv=None) -> int:
         else:
             _print_verify_summary(report)
         return 0 if report.ok else 1
+
+    if args.command == "migrate":
+        if args.as_json:
+            print(json.dumps(report.to_dict(), indent=2))
+        else:
+            _print_migrate_summary(report)
+        return 0 if (report.migrated or report.already_current) else 1
 
     if args.as_json:
         print(json.dumps(report.to_dict(), indent=2))

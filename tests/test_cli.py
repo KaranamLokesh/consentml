@@ -155,3 +155,54 @@ def test_cli_verify_permission_denied_db_exits_two(tmp_path, capsys):
     assert exit_code == 2
     err = capsys.readouterr().err
     assert "Error: could not open database" in err
+
+
+def test_cli_migrate_succeeds(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    assert main(["migrate", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "Migrated" in out
+
+
+def test_cli_migrate_is_idempotent(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    main(["migrate", "--db", str(db)])
+    capsys.readouterr()
+    assert main(["migrate", "--db", str(db)]) == 0
+    assert "already" in capsys.readouterr().out.lower()
+
+
+def test_cli_migrate_refuses_tampered_and_exits_one(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute("DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
+    conn.close()
+    assert main(["migrate", "--db", str(db)]) == 1
+    out = capsys.readouterr().out
+    assert "subject_count_mismatch" in out
+
+
+def test_cli_migrate_json(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    assert main(["migrate", "--db", str(db), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["migrated"] is True
+    assert data["bytes_after"] > 0
+
+
+def test_cli_migrate_allow_unverified_migrates_tampered(tmp_path, capsys, build_legacy):
+    db = tmp_path / "legacy.db"
+    build_legacy(db)
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute("DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
+    conn.close()
+    exit_code = main(["migrate", "--db", str(db), "--allow-unverified"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Migrated" in out
