@@ -16,7 +16,7 @@ class AffectedModel:
     run_id: str
     model_name: str
     model_hash: str
-    data_source: str
+    provenance: str
     started_at: str
     finished_at: str
     recommendation: str
@@ -73,7 +73,7 @@ def revoke(*, subject_id, db_path=None, dry_run=False) -> AffectedModelsReport:
                     run_id=r["run_id"],
                     model_name=r["model_name"],
                     model_hash=r["model_hash"],
-                    data_source=r["data_source"],
+                    provenance=r["provenance"],
                     started_at=r["started_at"],
                     finished_at=r["finished_at"],
                     recommendation=actions[r["model_name"]],

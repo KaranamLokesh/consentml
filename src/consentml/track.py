@@ -57,8 +57,12 @@ def track(*, data_source, subject_id_col, model_name, hash_subject_ids=True, db_
                 store.record_training_run(
                     model_name=model_name,
                     model_hash=model_hash,
-                    data_source=data_source,
-                    subject_id_col=subject_id_col,
+                    provenance={
+                        "kind": "dataframe",
+                        "label": data_source,
+                        "subject_id_col": subject_id_col,
+                        "n_rows": int(len(df)),
+                    },
                     subject_ids_hashed=hash_subject_ids,
                     subject_id_values=subject_values,
                     started_at=started_at,

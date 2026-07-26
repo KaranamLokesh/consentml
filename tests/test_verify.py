@@ -22,8 +22,7 @@ def _seed(db, n_runs=3):
             store.record_training_run(
                 model_name=f"model_{i}",
                 model_hash=f"hash_{i}",
-                data_source="postgres://prod/customers",
-                subject_id_col="email",
+                provenance={"kind": "dataframe", "label": "postgres://prod/customers"},
                 subject_ids_hashed=True,
                 subject_id_values=[f"s{i}a", f"s{i}b"],
                 started_at=f"2026-07-{i + 1:02d}T00:00:00+00:00",
@@ -313,10 +312,10 @@ def test_unlogged_run_is_detected(db):
     _seed(db, n_runs=1)
     _sql(
         db,
-        "INSERT INTO training_runs (run_id, model_name, model_hash, data_source, "
-        "subject_id_col, subject_ids_hashed, n_subjects, started_at, finished_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("smuggled-run", "shadow", "h", "src", "email", 1, 0,
+        "INSERT INTO training_runs (run_id, model_name, model_hash, provenance, "
+        "subject_ids_hashed, n_subjects, started_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("smuggled-run", "shadow", "h", '{"kind": "dataframe", "label": "src"}', 1, 0,
          "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
     report = verify_audit_log(db_path=db)
@@ -332,8 +331,7 @@ def test_zero_subject_run_is_not_a_mismatch(db):
         store.record_training_run(
             model_name="empty",
             model_hash="h",
-            data_source="src",
-            subject_id_col="email",
+            provenance={"kind": "dataframe", "label": "src"},
             subject_ids_hashed=True,
             subject_id_values=[],
             started_at="2026-07-01T00:00:00+00:00",
@@ -424,19 +422,19 @@ def test_mixed_type_unlogged_run_ids_do_not_raise(db):
     LineageStore(db_path=db).close()
     _sql(
         db,
-        "INSERT INTO training_runs (run_id, model_name, model_hash, data_source, "
-        "subject_id_col, subject_ids_hashed, n_subjects, started_at, finished_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("text-run-id", "shadow-a", "h", "src", "email", 1, 0,
+        "INSERT INTO training_runs (run_id, model_name, model_hash, provenance, "
+        "subject_ids_hashed, n_subjects, started_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("text-run-id", "shadow-a", "h", '{"kind": "dataframe", "label": "src"}', 1, 0,
          "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
     _sql(
         db,
-        "INSERT INTO training_runs (run_id, model_name, model_hash, data_source, "
-        "subject_id_col, subject_ids_hashed, n_subjects, started_at, finished_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (b"\x00\x01blob-run-id", "shadow-b", "h", "src", "email", 1, 0,
-         "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
+        "INSERT INTO training_runs (run_id, model_name, model_hash, provenance, "
+        "subject_ids_hashed, n_subjects, started_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (b"\x00\x01blob-run-id", "shadow-b", "h", '{"kind": "dataframe", "label": "src"}',
+         1, 0, "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
     report = verify_audit_log(db_path=db)
     findings = [f for f in report.findings if f.code == "unlogged_run"]

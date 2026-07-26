@@ -17,8 +17,7 @@ def seeded_db(tmp_path):
         store.record_training_run(
             model_name="churn_v3",
             model_hash="beef",
-            data_source="postgres://prod/customers",
-            subject_id_col="email",
+            provenance={"kind": "dataframe", "label": "postgres://prod/customers"},
             subject_ids_hashed=True,
             subject_id_values=[hash_subject_id("a@x.com")],
             started_at="2026-07-01T00:00:00+00:00",

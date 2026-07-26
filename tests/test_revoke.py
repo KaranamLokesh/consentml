@@ -20,8 +20,7 @@ def _seed_run(db, model_name, subjects, started_at, hashed=True):
         return store.record_training_run(
             model_name=model_name,
             model_hash="beef",
-            data_source="postgres://prod/customers",
-            subject_id_col="email",
+            provenance={"kind": "dataframe", "label": "postgres://prod/customers"},
             subject_ids_hashed=hashed,
             subject_id_values=values,
             started_at=started_at,

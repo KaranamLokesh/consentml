@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
@@ -41,7 +43,7 @@ def test_track_records_lineage(tmp_path, df):
         assert len(runs) == 1
         run = runs[0]
         assert run["model_name"] == "churn_v3"
-        assert run["data_source"] == "postgres://prod/customers"
+        assert json.loads(run["provenance"])["label"] == "postgres://prod/customers"
         assert run["n_subjects"] == 3  # unique subjects, not rows
         assert run["subject_ids_hashed"] == 1
         assert len(run["model_hash"]) == 64

@@ -1,13 +1,15 @@
 """SQLite-backed lineage store.
 
 Four tables:
-- training_runs: one row per decorated training execution.
+- training_runs: one row per decorated training execution. Provenance is a
+  JSON document whose SHA-256 is recorded in the audit log, so edits to it
+  are detectable.
 - subjects: each distinct subject key, stored once.
 - subject_index: one row per (run, subject) pair, by integer foreign key.
 - audit_log: append-only, hash-chained event log.
 
-Schema version lives in PRAGMA user_version. Version 0 databases predate
-versioning; they can be read but not written -- see consentml.migrate.
+Schema version lives in PRAGMA user_version. Versions 0 and 1 predate the
+provenance column; they can be read but not written -- see consentml.migrate.
 """
 
 import hashlib
@@ -21,12 +23,22 @@ from pathlib import Path
 from consentml.errors import ConsentMLError
 
 GENESIS_HASH = "0" * 64
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _RUN_COLS = [
-    "run_id", "model_name", "model_hash", "data_source",
-    "subject_id_col", "subject_ids_hashed", "n_subjects",
-    "started_at", "finished_at",
+    "run_id", "model_name", "model_hash", "provenance",
+    "subject_ids_hashed", "n_subjects", "started_at", "finished_at",
+]
+
+# Schema v0 predates the provenance column -- its training_runs table still
+# has data_source and subject_id_col, not provenance. Aliasing data_source AS
+# provenance (and dropping subject_id_col) lets every read path return the
+# same _RUN_COLS shape regardless of which on-disk schema version it's
+# reading, so dict(zip(_RUN_COLS, row)) below stays correct for legacy
+# databases too, without a parallel set of query strings for every caller.
+_RUN_COLS_V0 = [
+    "run_id", "model_name", "model_hash", "data_source AS provenance",
+    "subject_ids_hashed", "n_subjects", "started_at", "finished_at",
 ]
 
 _SCHEMA = """
@@ -35,8 +47,7 @@ CREATE TABLE IF NOT EXISTS training_runs (
     run_id TEXT NOT NULL UNIQUE,
     model_name TEXT NOT NULL,
     model_hash TEXT NOT NULL,
-    data_source TEXT NOT NULL,
-    subject_id_col TEXT NOT NULL,
+    provenance TEXT NOT NULL,
     subject_ids_hashed INTEGER NOT NULL,
     n_subjects INTEGER NOT NULL,
     started_at TEXT NOT NULL,
@@ -84,6 +95,29 @@ def default_db_path() -> Path:
     return Path.home() / ".consentml" / "lineage.db"
 
 
+def provenance_text(provenance: dict) -> str:
+    """Canonical serialization of a provenance record.
+
+    sort_keys is what makes the hash stable: two dicts with the same content
+    must produce the same text, or verification would report a false
+    provenance_modified on every run.
+    """
+    return json.dumps(provenance, sort_keys=True)
+
+
+def provenance_hash(text) -> str | None:
+    """SHA-256 of stored provenance text, or None if it isn't text.
+
+    Returns None rather than raising for non-str input: the value comes
+    straight out of a database column an attacker may have replaced with a
+    BLOB or an integer, and verify_audit_log() must never raise on hostile
+    database contents. A None here reports as provenance_modified.
+    """
+    if not isinstance(text, str):
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 class LineageStore:
     def __init__(self, db_path=None):
         self.db_path = Path(db_path) if db_path is not None else default_db_path()
@@ -126,8 +160,7 @@ class LineageStore:
         *,
         model_name,
         model_hash,
-        data_source,
-        subject_id_col,
+        provenance,
         subject_ids_hashed,
         subject_id_values,
         started_at,
@@ -137,17 +170,17 @@ class LineageStore:
         entry, in a single transaction. Returns the new run_id."""
         self._require_writable()
         run_id = str(uuid.uuid4())
+        text = provenance_text(provenance)
         with self._conn:
             cursor = self._conn.execute(
                 "INSERT INTO training_runs (run_id, model_name, model_hash, "
-                "data_source, subject_id_col, subject_ids_hashed, n_subjects, "
-                "started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "provenance, subject_ids_hashed, n_subjects, "
+                "started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     model_name,
                     model_hash,
-                    data_source,
-                    subject_id_col,
+                    text,
                     int(subject_ids_hashed),
                     len(subject_id_values),
                     started_at,
@@ -171,7 +204,7 @@ class LineageStore:
                         "run_id": run_id,
                         "model_name": model_name,
                         "model_hash": model_hash,
-                        "data_source": data_source,
+                        "provenance_sha256": provenance_hash(text),
                         "n_subjects": len(subject_id_values),
                     },
                     sort_keys=True,
@@ -182,14 +215,15 @@ class LineageStore:
     def runs_for_subject_value(self, subject_id_value) -> list[dict]:
         """Training runs whose subject index contains the given stored value
         (a hash when subject_ids_hashed, else the raw ID)."""
-        cols = ", ".join(f"r.{c}" for c in _RUN_COLS)
         if self.schema_version == 0:
+            cols = ", ".join(f"r.{c}" for c in _RUN_COLS_V0)
             sql = (
                 f"SELECT {cols} FROM training_runs r "
                 "JOIN subject_index s ON s.run_id = r.run_id "
                 "WHERE s.subject_id_hash = ? ORDER BY r.started_at"
             )
         else:
+            cols = ", ".join(f"r.{c}" for c in _RUN_COLS)
             sql = (
                 f"SELECT {cols} FROM training_runs r "
                 "JOIN subject_index s ON s.run_pk = r.run_pk "
@@ -201,8 +235,9 @@ class LineageStore:
 
     def latest_run_for_model(self, model_name) -> dict | None:
         """The most recent training run (by started_at) for a model name."""
+        cols = ", ".join(_RUN_COLS_V0 if self.schema_version == 0 else _RUN_COLS)
         row = self._conn.execute(
-            f"SELECT {', '.join(_RUN_COLS)} FROM training_runs "
+            f"SELECT {cols} FROM training_runs "
             "WHERE model_name = ? ORDER BY started_at DESC LIMIT 1",
             (model_name,),
         ).fetchone()
@@ -210,8 +245,9 @@ class LineageStore:
 
     def run_by_id(self, run_id) -> dict | None:
         """The training run with this id, or None if it is absent."""
+        cols = ", ".join(_RUN_COLS_V0 if self.schema_version == 0 else _RUN_COLS)
         row = self._conn.execute(
-            f"SELECT {', '.join(_RUN_COLS)} FROM training_runs WHERE run_id = ?",
+            f"SELECT {cols} FROM training_runs WHERE run_id = ?",
             (run_id,),
         ).fetchone()
         return dict(zip(_RUN_COLS, row)) if row else None

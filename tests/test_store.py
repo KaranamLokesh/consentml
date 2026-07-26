@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from consentml.errors import ConsentMLError
-from consentml.store import LineageStore, default_db_path
+from consentml.store import LineageStore, default_db_path, provenance_hash, provenance_text
 
 
 @pytest.fixture
@@ -82,8 +82,7 @@ def _record_sample_run(
     return store.record_training_run(
         model_name=model_name,
         model_hash="deadbeef",
-        data_source="postgres://prod/customers",
-        subject_id_col="email",
+        provenance={"kind": "dataframe", "label": "postgres://prod/customers"},
         subject_ids_hashed=True,
         subject_id_values=list(subject_hashes),
         started_at=started_at,
@@ -205,11 +204,11 @@ def test_all_run_ids_empty(store):
     assert store.all_run_ids() == set()
 
 
-def test_fresh_database_is_schema_v1(store, tmp_path):
-    assert store.schema_version == 1
+def test_fresh_database_is_schema_v2(store, tmp_path):
+    assert store.schema_version == 2
     conn = sqlite3.connect(tmp_path / "lineage.db")
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     finally:
         conn.close()
 
@@ -280,3 +279,63 @@ def test_legacy_writes_are_refused(legacy_db):
             )
     finally:
         s.close()
+
+
+def test_provenance_is_stored_as_sorted_json(tmp_path):
+    store = LineageStore(db_path=tmp_path / "l.db")
+    run_id = store.record_training_run(
+        model_name="m",
+        model_hash="mh",
+        provenance={"kind": "dataframe", "label": "clinic.patients", "n_rows": 2},
+        subject_ids_hashed=True,
+        subject_id_values=["a", "b"],
+        started_at="t0",
+        finished_at="t1",
+    )
+    stored = store._conn.execute(
+        "SELECT provenance FROM training_runs WHERE run_id = ?", (run_id,)
+    ).fetchone()[0]
+    assert json.loads(stored) == {
+        "kind": "dataframe", "label": "clinic.patients", "n_rows": 2
+    }
+    assert stored == json.dumps(json.loads(stored), sort_keys=True)
+    store.close()
+
+
+def test_audit_payload_carries_provenance_sha256_not_data_source(tmp_path):
+    store = LineageStore(db_path=tmp_path / "l.db")
+    provenance = {"kind": "dataframe", "label": "x", "n_rows": 1}
+    store.record_training_run(
+        model_name="m",
+        model_hash="mh",
+        provenance=provenance,
+        subject_ids_hashed=True,
+        subject_id_values=["a"],
+        started_at="t0",
+        finished_at="t1",
+    )
+    payload = json.loads(store.audit_entries()[0]["payload"])
+    assert "data_source" not in payload
+    assert payload["provenance_sha256"] == provenance_hash(
+        provenance_text(provenance)
+    )
+    store.close()
+
+
+def test_provenance_hash_of_non_string_is_none():
+    """provenance_hash() is exercised here directly against a non-str value
+    (nothing in this module's own call path can produce one): a later task
+    feeds it values read straight from the provenance column, which a
+    tampered database could hold as a BLOB or integer rather than TEXT."""
+    assert provenance_hash(123) is None
+
+
+def test_schema_version_is_2(tmp_path):
+    store = LineageStore(db_path=tmp_path / "l.db")
+    assert store.schema_version == 2
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    cols = [c[1] for c in store._conn.execute("PRAGMA table_info(training_runs)")]
+    assert "provenance" in cols
+    assert "data_source" not in cols
+    assert "subject_id_col" not in cols
+    store.close()
