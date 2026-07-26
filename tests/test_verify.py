@@ -100,10 +100,12 @@ def test_missing_database_is_reported_not_created(db):
 
 
 def test_empty_file_is_reported_not_a_lineage_database_and_left_untouched(db):
-    # An empty file *exists*, so it doesn't hit the missing_database check --
-    # but LineageStore._detect_schema treats a training_runs-less file as
-    # "provision a fresh v1 schema here," which would silently turn this
-    # into an empty-but-valid lineage database and then report ok=True.
+    # An empty file *exists* and SQLite opens it happily as a valid, empty
+    # database -- so it doesn't hit the missing_database check, and it's
+    # genuinely readable, not an I/O failure. But LineageStore._detect_schema
+    # treats a training_runs-less file as "provision a fresh v1 schema
+    # here," which would silently turn this into an empty-but-valid lineage
+    # database and then report ok=True.
     db.write_bytes(b"")
     report = verify_audit_log(db_path=db)
     assert report.ok is False
@@ -111,12 +113,17 @@ def test_empty_file_is_reported_not_a_lineage_database_and_left_untouched(db):
     assert db.read_bytes() == b""
 
 
-def test_non_sqlite_file_is_reported_not_a_lineage_database_and_left_untouched(db):
+def test_non_sqlite_file_raises_instead_of_reporting_not_a_lineage_database(db):
+    # Distinct from the empty-file case: this file cannot be read as a
+    # SQLite database at all -- an I/O failure, not "readable but not
+    # ours". verify_audit_log() deliberately lets this propagate (the CLI
+    # catches it and reports exit 2) rather than folding it into
+    # not_a_lineage_database, which would make "permission denied" and
+    # "directory at this path" indistinguishable from "wrong --db path".
     junk = b"this is not a sqlite database, just plain bytes" * 5
     db.write_bytes(junk)
-    report = verify_audit_log(db_path=db)
-    assert report.ok is False
-    assert _codes(report) == ["not_a_lineage_database"]
+    with pytest.raises(sqlite3.DatabaseError):
+        verify_audit_log(db_path=db)
     assert db.read_bytes() == junk
 
 

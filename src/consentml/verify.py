@@ -254,22 +254,26 @@ def _is_lineage_database(db) -> bool:
     create or modify the file no matter what it contains -- unlike a plain
     sqlite3.connect() or LineageStore, either of which will happily
     provision a fresh empty schema onto a file that doesn't have one yet.
-    That is exactly the trap: pointing verify_audit_log at an empty file,
-    a directory, or a foreign SQLite database must never turn it into an
-    empty-but-valid lineage database and then report a clean bill of
-    health for it.
+    A 0-byte file lands here: SQLite opens it as a valid, empty database,
+    so the query below runs cleanly and simply finds no audit_log table.
+
+    Deliberately does NOT catch sqlite3.Error or OSError here. Those mean
+    the file could not be read at all -- permission denied, a directory,
+    bytes that aren't a SQLite database -- which is a different operator
+    problem from "this is a readable database that just isn't ours" (fix
+    permissions/the path, vs. fix --db). verify_audit_log() has always let
+    that class of failure propagate so the CLI can report it distinctly
+    (exit 2, vs. exit 1 for a reported finding); this function's never-raise
+    contract covers hostile *database contents*, not I/O failures, and
+    widening this except to swallow them would make exit 2 unreachable and
+    silently mislabel "permission denied" as "wrong --db path".
     """
-    try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return False
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_log'"
         ).fetchone()
         return row is not None
-    except sqlite3.Error:
-        return False
     finally:
         conn.close()
 

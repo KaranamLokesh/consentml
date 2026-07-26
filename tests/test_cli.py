@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 
 import pytest
@@ -119,15 +120,38 @@ def test_cli_verify_missing_db_exits_nonzero(tmp_path, capsys):
     assert not missing.exists()
 
 
-def test_cli_verify_unopenable_db_reports_not_a_lineage_database(tmp_path, capsys):
-    # A directory at the db path can't be opened by sqlite3 at all. Older
-    # behavior let this raise out of verify_audit_log and land in the CLI's
-    # generic "could not open database" handler (exit 2) -- but
-    # verify_audit_log() must never raise, so this is now a normal, reported
-    # verification failure (exit 1) like any other bad path.
+def test_cli_verify_unopenable_db_exits_two(tmp_path, capsys):
+    # A directory at the db path can't be opened by sqlite3 at all, so this
+    # never gets far enough to see "no database" -- it's a harder failure,
+    # distinct from not_a_lineage_database (a readable file that just isn't
+    # ours). verify_audit_log() lets this propagate on purpose so the CLI
+    # can tell "wrong --db path" apart from "couldn't read it at all".
     unopenable = tmp_path / "not-a-db.db"
     unopenable.mkdir()
     exit_code = main(["verify", "--db", str(unopenable)])
-    assert exit_code == 1
-    out = capsys.readouterr().out
-    assert "not_a_lineage_database" in out
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "Error: could not open database" in err
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores file permission bits, so chmod 000 wouldn't block reads",
+)
+def test_cli_verify_permission_denied_db_exits_two(tmp_path, capsys):
+    # A real, valid lineage database that the process simply cannot read.
+    # Distinct from not_a_lineage_database in the same way as the directory
+    # case above: this is an I/O failure (fix permissions), not "wrong
+    # --db path" (fix the path) -- and unlike the directory case, this one
+    # actually is a lineage database, so it must not be reported as if it
+    # weren't.
+    unreadable = tmp_path / "lineage.db"
+    LineageStore(db_path=unreadable).close()
+    os.chmod(unreadable, 0o000)
+    try:
+        exit_code = main(["verify", "--db", str(unreadable)])
+    finally:
+        os.chmod(unreadable, 0o644)  # restore so tmp_path cleanup can remove it
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "Error: could not open database" in err
