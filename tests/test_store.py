@@ -37,14 +37,23 @@ def test_creates_parent_directory(tmp_path):
 
 
 def test_subject_index_is_indexed(store, tmp_path):
+    """subject_index must be indexed for subject lookups. Assert the intent
+    (an index covering subject_pk exists) rather than a literal index name,
+    so this doesn't break again the next time an index is renamed."""
     conn = sqlite3.connect(tmp_path / "lineage.db")
     try:
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
+        index_names = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='subject_index'"
         ).fetchall()
+        indexed_columns = set()
+        for (name,) in index_names:
+            indexed_columns.update(
+                row[2] for row in conn.execute(f"PRAGMA index_info({name})")
+            )
     finally:
         conn.close()
-    assert "idx_subject_id_hash" in {r[0] for r in rows}
+    assert "subject_pk" in indexed_columns
 
 
 def test_init_is_idempotent(tmp_path):
@@ -193,3 +202,41 @@ def test_all_run_ids(store):
 
 def test_all_run_ids_empty(store):
     assert store.all_run_ids() == set()
+
+
+def test_fresh_database_is_schema_v1(store, tmp_path):
+    assert store.schema_version == 1
+    conn = sqlite3.connect(tmp_path / "lineage.db")
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_fresh_database_has_subjects_table(store, tmp_path):
+    assert "subjects" in _table_names(tmp_path / "lineage.db")
+
+
+def test_subject_keys_are_stored_once_across_runs(store, tmp_path):
+    _record_sample_run(store, model_name="a", subject_hashes=("h1", "h2"))
+    _record_sample_run(store, model_name="b", subject_hashes=("h1", "h2"))
+    conn = sqlite3.connect(tmp_path / "lineage.db")
+    try:
+        n_subjects = conn.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
+        n_index = conn.execute("SELECT COUNT(*) FROM subject_index").fetchone()[0]
+    finally:
+        conn.close()
+    assert n_subjects == 2   # deduplicated
+    assert n_index == 4      # one row per (run, subject), NOT deduplicated
+
+
+def test_lookup_still_works_after_interning(store):
+    run_id = _record_sample_run(store)
+    runs = store.runs_for_subject_value("h1")
+    assert [r["run_id"] for r in runs] == [run_id]
+    assert runs[0]["model_name"] == "churn_v3"
+
+
+def test_subject_count_for_run_after_interning(store):
+    run_id = _record_sample_run(store, subject_hashes=("h1", "h2", "h3"))
+    assert store.subject_count_for_run(run_id) == 3
