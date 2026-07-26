@@ -1,0 +1,271 @@
+"""Migrate a v0 lineage database onto the interned v1 schema.
+
+The migration is gated by verification on both sides. It refuses to run on a
+database that fails verification, because rewriting a tampered database
+produces a fresh, internally consistent one -- laundering the tampering and
+destroying the evidence.
+
+The new database is built alongside the original and only swapped into place
+once it verifies clean, so a failure leaves the original untouched and there
+is no rollback logic to get wrong. The cost is temporary extra disk usage.
+"""
+
+import os
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from consentml.store import SCHEMA_VERSION, _SCHEMA, default_db_path
+from consentml.verify import VerificationFinding, verify_audit_log
+
+_RUN_COLS_V0 = (
+    "run_id, model_name, model_hash, data_source, subject_id_col, "
+    "subject_ids_hashed, n_subjects, started_at, finished_at"
+)
+
+
+@dataclass
+class MigrationResult:
+    migrated: bool
+    already_current: bool
+    findings: list = field(default_factory=list)
+    bytes_before: int = 0
+    bytes_after: int = 0
+    backup_path: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "migrated": self.migrated,
+            "already_current": self.already_current,
+            "findings": [
+                {"entry_id": f.entry_id, "code": f.code, "detail": f.detail}
+                for f in self.findings
+            ],
+            "bytes_before": self.bytes_before,
+            "bytes_after": self.bytes_after,
+            "backup_path": self.backup_path,
+            "error": self.error,
+        }
+
+
+def _copy_into_v1(src_path, dst_path):
+    """Build a v1 database at dst_path from the v0 database at src_path."""
+    dst = sqlite3.connect(dst_path)
+    try:
+        dst.executescript(_SCHEMA)
+        dst.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        src = sqlite3.connect(src_path)
+        try:
+            with dst:
+                for row in src.execute(f"SELECT {_RUN_COLS_V0} FROM training_runs"):
+                    dst.execute(
+                        f"INSERT INTO training_runs ({_RUN_COLS_V0}) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        row,
+                    )
+                # Intern the keys: each distinct value stored once...
+                dst.executemany(
+                    "INSERT OR IGNORE INTO subjects (subject_key) VALUES (?)",
+                    src.execute("SELECT DISTINCT subject_id_hash FROM subject_index"),
+                )
+                # ...but one index row per original row, so per-run counts
+                # are preserved exactly.
+                dst.executemany(
+                    "INSERT INTO subject_index (run_pk, subject_pk) "
+                    "SELECT r.run_pk, s.subject_pk FROM training_runs r, subjects s "
+                    "WHERE r.run_id = ? AND s.subject_key = ?",
+                    src.execute("SELECT run_id, subject_id_hash FROM subject_index"),
+                )
+                for row in src.execute(
+                    "SELECT id, timestamp, event_type, payload, prev_hash, "
+                    "entry_hash FROM audit_log ORDER BY id"
+                ):
+                    dst.execute(
+                        "INSERT INTO audit_log (id, timestamp, event_type, "
+                        "payload, prev_hash, entry_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                        row,
+                    )
+        finally:
+            src.close()
+    finally:
+        dst.close()
+
+
+def _row_counts(path) -> dict:
+    conn = sqlite3.connect(path)
+    try:
+        return {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("training_runs", "subject_index", "audit_log")
+        }
+    finally:
+        conn.close()
+
+
+def migrate_database(*, db_path=None, allow_unverified=False) -> MigrationResult:
+    """Migrate a lineage database onto schema v1.
+
+    Verifies before and after. Refuses to migrate a database that fails
+    verification unless allow_unverified is set.
+    """
+    db = Path(db_path) if db_path is not None else default_db_path()
+    if not db.exists():
+        return MigrationResult(
+            migrated=False,
+            already_current=False,
+            error=f"no lineage database at {db}",
+        )
+
+    try:
+        conn = sqlite3.connect(db)
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            has_training_runs = (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='training_runs'"
+                ).fetchone()
+                is not None
+            )
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        return MigrationResult(
+            migrated=False,
+            already_current=False,
+            error=f"{db} is not a valid SQLite database: {exc}",
+        )
+    if version >= SCHEMA_VERSION:
+        return MigrationResult(
+            migrated=False, already_current=True, bytes_before=db.stat().st_size
+        )
+    if not has_training_runs:
+        # An empty or freshly-created file, not a real legacy database. Bail
+        # out before calling verify_audit_log: LineageStore._detect_schema
+        # treats a training_runs-less file as "provision a fresh v1 schema
+        # here", which would initialize schema on this exact path -- the
+        # opposite of leaving an unrecognized file untouched.
+        return MigrationResult(
+            migrated=False,
+            already_current=False,
+            bytes_before=db.stat().st_size,
+            error=f"{db} does not look like a consentml lineage database "
+            "(no training_runs table)",
+        )
+
+    before = verify_audit_log(db_path=db)
+    if not before.ok and not allow_unverified:
+        return MigrationResult(
+            migrated=False,
+            already_current=False,
+            findings=before.findings,
+            bytes_before=db.stat().st_size,
+            error="database failed verification; refusing to migrate",
+        )
+
+    bytes_before = db.stat().st_size
+    staging = db.parent / (db.name + ".migrating")
+    staging.unlink(missing_ok=True)
+    try:
+        try:
+            _copy_into_v1(db, staging)
+        except sqlite3.Error as exc:
+            return MigrationResult(
+                migrated=False,
+                already_current=False,
+                bytes_before=bytes_before,
+                error=f"migration failed while copying data: {exc}",
+            )
+
+        # The subject_index copy is a join on run_id/subject_key: a row
+        # whose run_id matches nothing in training_runs (e.g. tampering, or
+        # a dangling reference verify_audit_log's audit-log-anchored checks
+        # never see because no audit entry mentions it) simply produces no
+        # match and vanishes silently. Compare raw row counts so a dropped
+        # row is reported instead of shipping as a quiet success.
+        before_counts = _row_counts(db)
+        after_counts = _row_counts(staging)
+        if before_counts != after_counts and not allow_unverified:
+            mismatched = {
+                table: (before_counts[table], after_counts[table])
+                for table in before_counts
+                if before_counts[table] != after_counts[table]
+            }
+            return MigrationResult(
+                migrated=False,
+                already_current=False,
+                bytes_before=bytes_before,
+                findings=[
+                    VerificationFinding(
+                        entry_id=None,
+                        code="row_count_mismatch",
+                        detail=(
+                            f"row counts changed during migration: {mismatched} "
+                            "(likely a subject_index row referencing a "
+                            "nonexistent run); refusing to migrate"
+                        ),
+                    )
+                ],
+                error="migrated database row counts do not match the "
+                "original; original untouched",
+            )
+
+        after = verify_audit_log(db_path=staging)
+        if not after.ok and not allow_unverified:
+            return MigrationResult(
+                migrated=False,
+                already_current=False,
+                findings=after.findings,
+                bytes_before=bytes_before,
+                error="migrated database failed verification; original untouched",
+            )
+        backup = db.parent / (db.name + ".pre-migration.bak")
+        try:
+            # os.replace is a rename, not a byte copy: on the same filesystem
+            # (guaranteed here -- backup lives in db.parent) it is O(1)
+            # regardless of database size, unlike shutil.copy2. The two
+            # renames leave a window of a few microseconds where the db path
+            # doesn't exist between them; migration is a one-time offline
+            # operation with no concurrent writer expected, so that window
+            # is preferable to holding three copies of a multi-gigabyte
+            # database on disk at once (original + copy2 backup + staging).
+            os.replace(db, backup)
+            os.replace(staging, db)
+        except OSError as exc:
+            # rename() is atomic -- if the first replace succeeded and the
+            # second failed, db is left missing (moved to backup) while
+            # staging is untouched. Put the original back before reporting,
+            # so a mid-finalize failure can never leave the canonical path
+            # empty.
+            if not db.exists() and backup.exists():
+                try:
+                    os.replace(backup, db)
+                except OSError:
+                    return MigrationResult(
+                        migrated=False,
+                        already_current=False,
+                        bytes_before=bytes_before,
+                        error=(
+                            f"migration failed while finalizing: {exc}; "
+                            f"the original database could not be restored "
+                            f"from {backup} -- restore it manually before "
+                            "retrying"
+                        ),
+                    )
+            return MigrationResult(
+                migrated=False,
+                already_current=False,
+                bytes_before=bytes_before,
+                error=f"migration failed while finalizing: {exc}",
+            )
+    finally:
+        staging.unlink(missing_ok=True)
+
+    return MigrationResult(
+        migrated=True,
+        already_current=False,
+        bytes_before=bytes_before,
+        bytes_after=db.stat().st_size,
+        backup_path=str(backup),
+    )
