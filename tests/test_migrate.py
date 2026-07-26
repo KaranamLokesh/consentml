@@ -41,13 +41,28 @@ def test_verification_clean_before_and_after(legacy_db):
 def test_revoke_reports_are_identical_across_migration(legacy_db):
     """Migration is expected to change *how* provenance is represented (the
     v0 free-text data_source becomes structured "legacy" JSON -- that's the
-    whole point of this migration), so provenance itself is excluded from
-    the comparison. Everything else revoke() reports -- which models were
-    affected, their run_id/model_hash/timestamps, and the recommended
-    actions -- must be unaffected by migration."""
+    whole point of this migration), so strict equality on the raw
+    "provenance" field can't hold. But the property under test -- migration
+    doesn't lose or alter the underlying provenance value -- must still be
+    checked, not discarded: assert the pre-migration raw string equals the
+    post-migration parsed "label", keyed by run_id so the comparison
+    survives any reordering. Everything else revoke() reports -- which
+    models were affected, their run_id/model_hash/timestamps, and the
+    recommended actions -- must match exactly."""
     before = revoke(subject_id="h1", db_path=legacy_db, dry_run=True).to_dict()
     migrate_database(db_path=legacy_db)
     after = revoke(subject_id="h1", db_path=legacy_db, dry_run=True).to_dict()
+
+    before_provenance = {
+        m["run_id"]: m["provenance"] for m in before["affected_models"]
+    }
+    after_provenance = {
+        m["run_id"]: m["provenance"] for m in after["affected_models"]
+    }
+    assert after_provenance.keys() == before_provenance.keys()
+    for run_id, raw in before_provenance.items():
+        assert json.loads(after_provenance[run_id])["label"] == raw
+
     for report in (before, after):
         report.pop("generated_at")
         for model in report["affected_models"]:
@@ -125,6 +140,7 @@ def test_audit_log_survives_byte_for_byte(legacy_db):
         finally:
             conn.close()
 
+    _widen_audit_log_id_gap(legacy_db)  # see its docstring
     before = rows(legacy_db)
     migrate_database(db_path=legacy_db)
     assert rows(legacy_db) == before
@@ -370,6 +386,51 @@ def _provenances(db):
         conn.close()
 
 
+def _legacy_columns_by_run_id(db):
+    """run_id -> (data_source, subject_id_col) as stored in a v0/v1 source
+    database, before migration touches it."""
+    conn = sqlite3.connect(db)
+    try:
+        return {
+            run_id: (data_source, subject_id_col)
+            for run_id, data_source, subject_id_col in conn.execute(
+                "SELECT run_id, data_source, subject_id_col FROM training_runs"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _provenance_by_run_id(db):
+    conn = sqlite3.connect(db)
+    try:
+        return {
+            run_id: json.loads(provenance)
+            for run_id, provenance in conn.execute(
+                "SELECT run_id, provenance FROM training_runs"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _widen_audit_log_id_gap(db):
+    """Renumber the last audit_log row to a non-contiguous id (7, skipping
+    3-6), so a test asserting id is preserved across migration can't pass
+    by coincidence. Every fixture in this suite happens to produce
+    contiguous AUTOINCREMENT ids starting at 1, which would otherwise mask
+    migration silently renumbering entries -- a real audit log can have
+    gaps (a rolled-back AUTOINCREMENT insert burns its id permanently), and
+    renumbering during migration would rewrite an entry's identity while
+    still reporting migrated=True and verifying ok=True."""
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "UPDATE audit_log SET id = 7 WHERE id = (SELECT MAX(id) FROM audit_log)"
+        )
+    conn.close()
+
+
 def test_v1_migrates_to_v2_with_legacy_provenance(v1_db):
     result = migrate_database(db_path=v1_db)
     assert result.migrated, result.error
@@ -385,15 +446,29 @@ def test_v1_migrates_to_v2_with_legacy_provenance(v1_db):
 
 
 def test_v0_migrates_straight_to_v2(legacy_db):
+    # The full-dict check matters here, not just "kind" -- a migration that
+    # silently dropped or corrupted the v0 data_source/subject_id_col would
+    # still leave every run's "kind" as "legacy" and pass a weaker check.
+    before = _legacy_columns_by_run_id(legacy_db)
+
     result = migrate_database(db_path=legacy_db)
+
     assert result.migrated, result.error
     conn = sqlite3.connect(legacy_db)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     conn.close()
-    assert all(p["kind"] == "legacy" for p in _provenances(legacy_db))
+    after = _provenance_by_run_id(legacy_db)
+    assert after.keys() == before.keys()
+    for run_id, (data_source, subject_id_col) in before.items():
+        assert after[run_id] == {
+            "kind": "legacy",
+            "label": data_source,
+            "subject_id_col": subject_id_col,
+        }
 
 
 def test_migration_leaves_the_audit_log_byte_identical(v1_db):
+    _widen_audit_log_id_gap(v1_db)  # see its docstring: ids must not be reproduced by coincidence
     conn = sqlite3.connect(v1_db)
     before = conn.execute(
         "SELECT id, timestamp, event_type, payload, prev_hash, entry_hash "
