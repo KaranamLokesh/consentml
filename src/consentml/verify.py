@@ -189,22 +189,11 @@ def _check_references(entries, parsed, store) -> tuple[list, int]:
 
         try:
             run = store.run_by_id(run_id)
-        except (sqlite3.InterfaceError, OverflowError, sqlite3.OperationalError):
+        except (sqlite3.InterfaceError, OverflowError):
             # InterfaceError: a type sqlite3 can't bind at all (shouldn't
             # reach here given the hash() check above, but defense in
             # depth). OverflowError: a JSON integer wider than SQLite's
             # 64-bit INTEGER, which hash()/bindability alone don't rule out.
-            # OperationalError: training_runs.provenance holds bytes that
-            # aren't valid UTF-8 (e.g. UPDATE ... SET provenance =
-            # CAST(x'fffe' AS TEXT)) -- sqlite3 raises when it tries to
-            # decode the TEXT column, on this SELECT, not on connect. That
-            # is hostile *contents*, exactly like the other two cases here,
-            # so it must land as a finding rather than propagate to the
-            # CLI's exit-2 (I/O failure) path -- unlike the OperationalError
-            # that _is_lineage_database()/LineageStore() would raise for a
-            # genuinely unreadable file, which must keep propagating so
-            # exit 2 stays reachable. Scoped to this one call for that
-            # reason: widening it elsewhere would swallow real I/O errors.
             findings.append(
                 VerificationFinding(
                     entry_id=entry["id"],

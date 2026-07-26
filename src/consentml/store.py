@@ -129,11 +129,32 @@ def provenance_hash(text) -> str | None:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _lenient_text(raw):
+    """Undecodable TEXT comes back as bytes instead of raising.
+
+    sqlite3 decodes TEXT strictly, so a column holding invalid UTF-8 raises
+    at fetch time -- before any verification logic can look at it. That
+    turned a table-only tamper into an unreadable-database error and sent
+    the CLI down the exit-2 path, reporting hostile *contents* through the
+    I/O channel. Returning raw bytes instead lets the value reach the code
+    that knows what to do with it: provenance_hash() returns None for
+    non-str input, which reports as provenance_modified.
+
+    Well-formed TEXT is unaffected -- it still decodes to str, so no other
+    column's behavior changes.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw
+
+
 class LineageStore:
     def __init__(self, db_path=None):
         self.db_path = Path(db_path) if db_path is not None else default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
+        self._conn.text_factory = _lenient_text
         self.schema_version = self._detect_schema()
 
     def _detect_schema(self) -> int:

@@ -697,12 +697,15 @@ def test_provenance_forged_to_null_does_not_verify_against_a_blob(tmp_path):
 def test_provenance_undecodable_utf8_text_is_detected_not_raised(tmp_path):
     """CAST(... AS TEXT) forces genuine TEXT storage class holding bytes that
     aren't valid UTF-8 -- distinct from the BLOB case above, which sqlite3
-    returns as bytes without attempting to decode at all. Reading a TEXT
-    column that fails to decode raises sqlite3.OperationalError from inside
-    store.run_by_id() itself, before provenance_hash() ever gets a chance to
-    run. That must still surface as a finding here, not propagate up to the
-    CLI's exit-2 (I/O failure) path -- the database was read fine; only its
-    contents are hostile."""
+    returns as bytes without attempting to decode at all. Without a lenient
+    text_factory, reading this column raises sqlite3.OperationalError from
+    inside store.run_by_id() itself, before provenance_hash() ever gets a
+    chance to run -- turning a table-only tamper into what looks like an
+    unreadable database and sending the CLI down the exit-2 (I/O failure)
+    path. LineageStore's text_factory returns raw bytes for undecodable TEXT
+    instead, so this reaches provenance_hash() same as the BLOB case and
+    reports provenance_modified, naming the column that was actually
+    tampered with rather than misdiagnosing the run_id as bad."""
     db = tmp_path / "l.db"
     _one_run(db)
     conn = sqlite3.connect(db)
@@ -712,7 +715,8 @@ def test_provenance_undecodable_utf8_text_is_detected_not_raised(tmp_path):
 
     report = verify_audit_log(db_path=db)
     assert not report.ok
-    assert [f.code for f in report.findings] == ["malformed_payload"]
+    assert [f.code for f in report.findings] == ["provenance_modified"]
+    assert "provenance" in report.findings[0].detail
 
 
 def test_clean_v2_database_reports_no_legacy_runs(tmp_path):
