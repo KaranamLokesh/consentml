@@ -152,13 +152,13 @@ def _check_references(entries, parsed, store) -> tuple[list, int]:
     runs are recorded.
 
     Returns (findings, n_legacy_runs). A legacy run is one whose audit payload
-    predates provenance hashing -- its provenance was backfilled by migration
-    and is NOT hash-protected, so it is counted and reported rather than
-    silently passing as if it had been checked.
+    predates provenance hashing -- its provenance is intended to be backfilled
+    by a future migration and is NOT hash-protected, so it is counted and
+    reported rather than silently passing as if it had been checked.
     """
     findings = []
     logged_run_ids = set()
-    n_legacy = 0
+    legacy_run_ids = set()
     for entry in entries:
         if entry["event_type"] != "training_run":
             continue
@@ -189,11 +189,22 @@ def _check_references(entries, parsed, store) -> tuple[list, int]:
 
         try:
             run = store.run_by_id(run_id)
-        except (sqlite3.InterfaceError, OverflowError):
+        except (sqlite3.InterfaceError, OverflowError, sqlite3.OperationalError):
             # InterfaceError: a type sqlite3 can't bind at all (shouldn't
             # reach here given the hash() check above, but defense in
             # depth). OverflowError: a JSON integer wider than SQLite's
             # 64-bit INTEGER, which hash()/bindability alone don't rule out.
+            # OperationalError: training_runs.provenance holds bytes that
+            # aren't valid UTF-8 (e.g. UPDATE ... SET provenance =
+            # CAST(x'fffe' AS TEXT)) -- sqlite3 raises when it tries to
+            # decode the TEXT column, on this SELECT, not on connect. That
+            # is hostile *contents*, exactly like the other two cases here,
+            # so it must land as a finding rather than propagate to the
+            # CLI's exit-2 (I/O failure) path -- unlike the OperationalError
+            # that _is_lineage_database()/LineageStore() would raise for a
+            # genuinely unreadable file, which must keep propagating so
+            # exit 2 stays reachable. Scoped to this one call for that
+            # reason: widening it elsewhere would swallow real I/O errors.
             findings.append(
                 VerificationFinding(
                     entry_id=entry["id"],
@@ -244,7 +255,15 @@ def _check_references(entries, parsed, store) -> tuple[list, int]:
                 )
 
         if "provenance_sha256" in payload:
-            if provenance_hash(run["provenance"]) != payload["provenance_sha256"]:
+            actual_hash = provenance_hash(run["provenance"])
+            # provenance_hash() returns None as a sentinel for "not
+            # verifiable text" (a BLOB, an int, ...), never as a real
+            # digest. It must never be allowed to compare equal to
+            # anything, including a payload whose provenance_sha256 was
+            # itself forged to JSON null -- `None == None` would otherwise
+            # report a clean bill of health for exactly the tampering this
+            # check exists to catch.
+            if actual_hash is None or actual_hash != payload["provenance_sha256"]:
                 findings.append(
                     VerificationFinding(
                         entry_id=entry["id"],
@@ -255,12 +274,32 @@ def _check_references(entries, parsed, store) -> tuple[list, int]:
                         ),
                     )
                 )
-        else:
+        elif "data_source" in payload:
             # Pre-v2 entry: its payload was hashed before provenance existed
-            # and must never be rewritten (see migrate.py), so there is
-            # nothing to check it against. Counted so the report can say so
-            # rather than implying it verified something it did not.
-            n_legacy += 1
+            # and must never be rewritten, or the hash chain over it would
+            # no longer match (a migration is expected to backfill
+            # training_runs.provenance from this free-text field without
+            # touching the already-hashed audit entry) -- so there is
+            # nothing to check it against. Counted by run_id, not by entry,
+            # so a run with more than one legacy entry isn't reported as
+            # more than one unverified run. Reported so the report can say
+            # so rather than implying it verified something it did not.
+            legacy_run_ids.add(run_id)
+        else:
+            # Neither key: not a shape any schema version ever wrote. Must
+            # not fall into the legacy bucket, which would silently accept
+            # any payload missing provenance_sha256 as "merely old" instead
+            # of flagging it as the malformed payload it actually is.
+            findings.append(
+                VerificationFinding(
+                    entry_id=entry["id"],
+                    code="malformed_payload",
+                    detail=(
+                        f"entry {entry['id']} payload has neither "
+                        "provenance_sha256 nor data_source"
+                    ),
+                )
+            )
 
     # sorted() on raw run_id values would raise TypeError if training_runs
     # ever holds a mix of types (e.g. a BLOB run_id alongside normal TEXT
@@ -276,7 +315,7 @@ def _check_references(entries, parsed, store) -> tuple[list, int]:
                 ),
             )
         )
-    return findings, n_legacy
+    return findings, len(legacy_run_ids)
 
 
 def _is_lineage_database(db) -> bool:

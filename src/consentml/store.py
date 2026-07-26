@@ -119,10 +119,10 @@ def provenance_hash(text) -> str | None:
     Returns None rather than raising for non-str input: the value comes
     straight out of a database column an attacker may have replaced with a
     BLOB or an integer, and verify_audit_log() must never raise on hostile
-    database contents. A later task wires this into verify_audit_log(),
-    where a None here is expected to report as a provenance_modified
-    finding; no such finding code exists yet, and no production path in
-    this commit reaches this branch.
+    database contents. verify_audit_log() treats a None here as a sentinel
+    that can never match a recorded hash -- including a payload whose
+    provenance_sha256 was itself forged to JSON null -- and reports it as a
+    provenance_modified finding.
     """
     if not isinstance(text, str):
         return None

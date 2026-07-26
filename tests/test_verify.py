@@ -659,6 +659,62 @@ def test_provenance_replaced_with_a_blob_is_detected_not_raised(tmp_path):
     assert [f.code for f in report.findings] == ["provenance_modified"]
 
 
+def test_provenance_forged_to_null_does_not_verify_against_a_blob(tmp_path):
+    """provenance_hash() returns None for a BLOB it can't treat as text.
+    That None must never be allowed to compare equal to anything -- including
+    a payload whose provenance_sha256 was itself forged to JSON null, which
+    would otherwise let `None == None` slip through as a clean bill of
+    health for exactly this tampering."""
+    db = tmp_path / "l.db"
+    _one_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE training_runs SET provenance = ?", (b"\xff\xfe",))
+    # Forging provenance_sha256 to null also changes the payload text, so
+    # entry_hash has to be recomputed here too -- otherwise the tamper would
+    # be masked by (and reported as) entry_hash_mismatch instead of
+    # exercising the None-vs-None comparison this test targets.
+    entry_id, timestamp, event_type, payload, prev_hash = conn.execute(
+        "SELECT id, timestamp, event_type, payload, prev_hash FROM audit_log"
+    ).fetchone()
+    forged_payload = json.loads(payload)
+    forged_payload["provenance_sha256"] = None
+    new_payload = json.dumps(forged_payload, sort_keys=True)
+    new_hash = hashlib.sha256(
+        (prev_hash + timestamp + event_type + new_payload).encode("utf-8")
+    ).hexdigest()
+    conn.execute(
+        "UPDATE audit_log SET payload = ?, entry_hash = ? WHERE id = ?",
+        (new_payload, new_hash, entry_id),
+    )
+    conn.commit()
+    conn.close()
+
+    report = verify_audit_log(db_path=db)
+    assert not report.ok
+    assert [f.code for f in report.findings] == ["provenance_modified"]
+
+
+def test_provenance_undecodable_utf8_text_is_detected_not_raised(tmp_path):
+    """CAST(... AS TEXT) forces genuine TEXT storage class holding bytes that
+    aren't valid UTF-8 -- distinct from the BLOB case above, which sqlite3
+    returns as bytes without attempting to decode at all. Reading a TEXT
+    column that fails to decode raises sqlite3.OperationalError from inside
+    store.run_by_id() itself, before provenance_hash() ever gets a chance to
+    run. That must still surface as a finding here, not propagate up to the
+    CLI's exit-2 (I/O failure) path -- the database was read fine; only its
+    contents are hostile."""
+    db = tmp_path / "l.db"
+    _one_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE training_runs SET provenance = CAST(x'fffe' AS TEXT)")
+    conn.commit()
+    conn.close()
+
+    report = verify_audit_log(db_path=db)
+    assert not report.ok
+    assert [f.code for f in report.findings] == ["malformed_payload"]
+
+
 def test_clean_v2_database_reports_no_legacy_runs(tmp_path):
     db = tmp_path / "l.db"
     _one_run(db)
@@ -668,54 +724,104 @@ def test_clean_v2_database_reports_no_legacy_runs(tmp_path):
     assert report.to_dict()["n_legacy_runs"] == 0
 
 
-def test_legacy_payload_in_a_v2_database_is_counted_not_checked(tmp_path):
-    """A single audit log can legitimately hold a MIX of payload shapes once
-    migration backfills old entries alongside new ones: pre-v2 entries carry
-    data_source, post-v2 entries carry provenance_sha256. This builds that
-    mix directly (there's no public API path to produce it yet) and checks
-    the legacy entry is counted, not silently treated as verified."""
-    db = tmp_path / "l.db"
-    store = LineageStore(db_path=db)
-    run_id = store.record_training_run(
-        model_name="m",
-        model_hash="mh",
-        provenance={"kind": "dataframe", "label": "x", "n_rows": 1},
-        subject_ids_hashed=True,
-        subject_id_values=["a"],
-        started_at="t0",
-        finished_at="t1",
-    )
-    store.close()
-
+def _insert_legacy_training_run(db, run_id, model_hash="legacy-mh", n_subjects=0):
+    """Insert a training_runs row directly, bypassing LineageStore, the way
+    an already-migrated legacy run would look: current v2 columns
+    (including a populated provenance, per migrate.py's design intent of
+    backfilling it from the old data_source), but referenced by an audit
+    entry whose payload predates provenance hashing entirely."""
     conn = sqlite3.connect(db)
     try:
-        row = conn.execute(
-            "SELECT entry_hash FROM audit_log ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        prev_hash = row[0]
-        timestamp = "2026-01-01T00:00:00+00:00"
-        payload = json.dumps(
-            {
-                "run_id": run_id,
-                "model_name": "m",
-                "model_hash": "mh",
-                "data_source": "postgres://prod/customers",
-                "n_subjects": 1,
-            },
-            sort_keys=True,
-        )
-        entry_hash = hashlib.sha256(
-            (prev_hash + timestamp + "training_run" + payload).encode("utf-8")
-        ).hexdigest()
         conn.execute(
-            "INSERT INTO audit_log (timestamp, event_type, payload, prev_hash, "
-            "entry_hash) VALUES (?, ?, ?, ?, ?)",
-            (timestamp, "training_run", payload, prev_hash, entry_hash),
+            "INSERT INTO training_runs (run_id, model_name, model_hash, "
+            "provenance, subject_ids_hashed, n_subjects, started_at, "
+            "finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, "legacy-m", model_hash,
+             '{"kind": "dataframe", "label": "postgres://prod/customers"}',
+             1, n_subjects, "2020-01-01T00:00:00+00:00", "2020-01-01T00:01:00+00:00"),
         )
         conn.commit()
     finally:
         conn.close()
 
+
+def test_legacy_payload_in_a_v2_database_is_counted_not_checked(tmp_path, append_entry):
+    """A single audit log can legitimately hold a MIX of payload shapes once
+    a future migration backfills old entries' training_runs rows alongside
+    new ones: pre-v2 entries carry data_source, post-v2 entries carry
+    provenance_sha256. This builds that mix directly (there's no public API
+    path to produce it yet): one ordinary v2 run plus one legacy run with
+    its own run_id and its own training_runs row -- not a second audit entry
+    bolted onto the v2 run's row, which would model a duplicate-log database
+    instead of a post-migration one. n_legacy_runs must count the one
+    genuinely-legacy run out of the two logged runs, and the report must
+    still be clean."""
+    db = tmp_path / "l.db"
+    _one_run(db)  # the ordinary v2 run
+    _insert_legacy_training_run(db, "legacy-run")
+
+    payload = json.dumps(
+        {
+            "run_id": "legacy-run",
+            "model_name": "legacy-m",
+            "model_hash": "legacy-mh",
+            "data_source": "postgres://prod/customers",
+            "n_subjects": 0,
+        },
+        sort_keys=True,
+    )
+    append_entry(db, "training_run", payload)
+
     report = verify_audit_log(db_path=db)
-    assert report.n_legacy_runs == 1
     assert report.ok
+    assert report.n_legacy_runs == 1
+
+
+def test_legacy_run_with_two_entries_is_counted_once(tmp_path, append_entry):
+    """n_legacy_runs counts distinct runs, not entries: a legacy run logged
+    twice (e.g. re-recorded, or simply two audit entries referencing the
+    same run_id) must still contribute 1 to the count, not 2."""
+    db = tmp_path / "l.db"
+    LineageStore(db_path=db).close()  # provision the v2 schema
+    _insert_legacy_training_run(db, "legacy-run")
+    payload = json.dumps(
+        {
+            "run_id": "legacy-run",
+            "model_name": "legacy-m",
+            "model_hash": "legacy-mh",
+            "data_source": "postgres://prod/customers",
+            "n_subjects": 0,
+        },
+        sort_keys=True,
+    )
+    append_entry(db, "training_run", payload)
+    append_entry(db, "training_run", payload)
+
+    report = verify_audit_log(db_path=db)
+    assert report.ok
+    assert report.n_legacy_runs == 1
+
+
+def test_payload_with_neither_provenance_key_is_malformed_not_legacy(tmp_path, append_entry):
+    """A payload lacking provenance_sha256 is only legacy if it carries the
+    one thing that ever made a payload lack it: data_source. Anything else
+    missing both keys is a shape no schema version ever wrote and must be
+    flagged as malformed, not silently folded into "merely old"."""
+    db = tmp_path / "l.db"
+    LineageStore(db_path=db).close()  # provision the v2 schema
+    _insert_legacy_training_run(db, "legacy-run")
+    payload = json.dumps(
+        {
+            "run_id": "legacy-run",
+            "model_name": "legacy-m",
+            "model_hash": "legacy-mh",
+            "n_subjects": 0,
+        },
+        sort_keys=True,
+    )
+    append_entry(db, "training_run", payload)
+
+    report = verify_audit_log(db_path=db)
+    assert not report.ok
+    assert [f.code for f in report.findings] == ["malformed_payload"]
+    assert report.n_legacy_runs == 0

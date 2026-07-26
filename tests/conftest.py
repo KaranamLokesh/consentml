@@ -8,6 +8,7 @@ than a mock.
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -41,11 +42,44 @@ CREATE TABLE audit_log (
 GENESIS = "0" * 64
 
 
+def append_audit_entry(path, event_type, payload) -> str:
+    """Append one hash-chained audit_log row to the database at path.
+
+    Mirrors LineageStore._append_audit_entry's arithmetic exactly (sha256 of
+    prev_hash + timestamp + event_type + payload, prev_hash taken from the
+    current last row or GENESIS if the log is empty). Extracted here because
+    this same arithmetic used to be re-derived independently in
+    build_legacy_db and in individual tests that hand-build an audit entry
+    (e.g. a legacy payload shape mixed into an otherwise-current database) --
+    three copies that could silently drift apart if the hash inputs ever
+    changed. Returns the new entry's hash, for chaining consecutive calls.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT entry_hash FROM audit_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        prev_hash = row[0] if row else GENESIS
+        timestamp = datetime.now(timezone.utc).isoformat()
+        entry_hash = hashlib.sha256(
+            (prev_hash + timestamp + event_type + payload).encode("utf-8")
+        ).hexdigest()
+        conn.execute(
+            "INSERT INTO audit_log (timestamp, event_type, payload, prev_hash, "
+            "entry_hash) VALUES (?, ?, ?, ?, ?)",
+            (timestamp, event_type, payload, prev_hash, entry_hash),
+        )
+        conn.commit()
+        return entry_hash
+    finally:
+        conn.close()
+
+
 def build_legacy_db(path, runs=(("churn_v3", ("h1", "h2")),)):
     """Write a v0 database with a valid hash chain. Returns the run_ids."""
     conn = sqlite3.connect(path)
     conn.executescript(_V0_SCHEMA)
-    run_ids, prev = [], GENESIS
+    run_ids = []
     for i, (model_name, subjects) in enumerate(runs):
         run_id = f"run-{i}"
         run_ids.append(run_id)
@@ -59,7 +93,7 @@ def build_legacy_db(path, runs=(("churn_v3", ("h1", "h2")),)):
             "INSERT INTO subject_index VALUES (?, ?)",
             [(run_id, s) for s in subjects],
         )
-        timestamp = f"2026-07-{i + 1:02d}T00:00:01+00:00"
+        conn.commit()
         payload = json.dumps(
             {
                 "run_id": run_id,
@@ -70,16 +104,7 @@ def build_legacy_db(path, runs=(("churn_v3", ("h1", "h2")),)):
             },
             sort_keys=True,
         )
-        entry_hash = hashlib.sha256(
-            (prev + timestamp + "training_run" + payload).encode("utf-8")
-        ).hexdigest()
-        conn.execute(
-            "INSERT INTO audit_log (timestamp, event_type, payload, prev_hash, "
-            "entry_hash) VALUES (?, ?, ?, ?, ?)",
-            (timestamp, "training_run", payload, prev, entry_hash),
-        )
-        prev = entry_hash
-    conn.commit()
+        append_audit_entry(path, "training_run", payload)
     conn.close()
     return run_ids
 
@@ -103,3 +128,15 @@ def build_legacy():
     on `from conftest import ...` resolving through pytest's path insertion.
     """
     return build_legacy_db
+
+
+@pytest.fixture
+def append_entry():
+    """append_audit_entry itself, for tests that need to hand-build a single
+    audit_log row with a correctly computed hash-chain link -- e.g. a
+    legacy payload shape appended after a normal v2 entry, to model a
+    database that legitimately holds a mix of both.
+
+    Exposed as a fixture for the same reason as build_legacy above.
+    """
+    return append_audit_entry
