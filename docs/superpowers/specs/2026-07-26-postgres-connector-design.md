@@ -32,9 +32,21 @@ In scope: reading training data from Postgres, recording verified structured
 provenance, and unifying the `@track` API behind a `Source` interface.
 
 Out of scope: moving the lineage store itself to Postgres (a separate feature
-that shares no code with this one); streaming or distributed sources. The
-interface is designed so a `SparkSource` can be added later without changing
-it (§8), but no such source is built here.
+that shares no code with this one); streaming or distributed sources; Snowflake.
+The interface is designed so `SnowflakeSource` and `SparkSource` can be added
+later without changing it (§8), but neither is built here.
+
+Postgres is deliberately first even though the author's own tables live in
+Snowflake (§8.1). The reason is CI: a Postgres service container is free,
+hermetic, and runs on every pull request, which is what the 100% coverage gate
+depends on. Snowflake in CI would require an account, credentials in repository
+secrets, and per-query spend on a public repo, and contributors could not run
+the suite at all. Postgres proves the `Source` abstraction cheaply; the
+Snowflake source then lands as a small change against a validated interface.
+
+The accepted cost: Postgres cannot be dogfooded against the author's real data,
+so this connector will be well-tested but unexercised in production until
+`SnowflakeSource` exists.
 
 ## 3. Decisions
 
@@ -155,11 +167,25 @@ Username and password never appear. The DSN is parsed and only host, port and
 database survive; the parse happens before the connection is opened, so a
 connection failure cannot leak a password through a traceback.
 
+**Connection fields are per-`kind`, not a shared schema.** `host`/`port`/
+`database` are libpq-shaped and belong to `kind: "postgres"` alone; a Snowflake
+record would carry account, warehouse, database and schema instead. Only
+`kind`, `n_rows`, and — where the source runs a query — `query`,
+`query_sha256`, `referenced_tables` and `referenced_tables_source` are common
+across query-backed sources. Nothing in the core reads any of these fields;
+they are recorded, hashed, and reported.
+
 `referenced_tables` comes from `EXPLAIN (FORMAT JSON)` — Postgres reports the
 relations, so ConsentML never parses SQL. The list is **advisory**: tables the
-planner optimizes away will not appear. `referenced_tables_source` makes this
-self-describing, and `query` remains the authoritative record of what ran.
-`referenced_tables` is sorted for stable hashing.
+planner optimizes away will not appear. `query` remains the authoritative
+record of what ran. `referenced_tables` is sorted for stable hashing.
+
+`referenced_tables_source` names the mechanism rather than assuming one, so
+each engine declares how its list was obtained and how far it can be trusted.
+`"explain"` means plan-derived and advisory; `"unavailable"` means not
+obtained (§7). Engines that can report accessed objects authoritatively get
+their own value (§8.1). A reader must be able to tell an advisory list from an
+authoritative one without knowing which engine produced it.
 
 `DataFrameSource`:
 
@@ -238,10 +264,19 @@ leaves no lineage record.
 | `subject_id_col` absent from result | `ConsentMLError` before training |
 | Empty result set | `ConsentMLError` — a run over zero subjects is nearly always a bug, and recording it produces a lineage entry that looks like real coverage |
 | `EXPLAIN` fails | **Run proceeds.** `referenced_tables: null`, `referenced_tables_source: "unavailable"` |
-| Query attempts a write | Rejected; the transaction is read-only |
+| Query attempts a write | Rejected (§7.1) |
 
-Every query runs in an explicitly read-only transaction. ConsentML must never
-write to the caller's database.
+### 7.1 Never write to the source
+
+**The requirement is that no source ever writes to the system it reads from.**
+That is a property every `Source` implementation must guarantee; the mechanism
+is the implementation's business and differs by engine.
+
+`PostgresSource` satisfies it with an explicitly read-only transaction. A
+Snowflake source would satisfy it with a read-only role, since Snowflake has no
+equivalent transaction mode. The spec states the guarantee, not the mechanism,
+so that a later source is held to the same standard rather than to Postgres's
+implementation of it.
 
 One constraint carried forward from weeks 7–8, where the same mistake was made
 twice: psycopg exceptions are caught **narrowly and re-raised as
@@ -249,9 +284,9 @@ twice: psycopg exceptions are caught **narrowly and re-raised as
 `except Exception`. The contract here is *fail clearly*, not *never raise*.
 `sources/postgres.py` carries a comment saying so.
 
-## 8. Designing for a later Spark source
+## 8. Designing for later sources
 
-No Spark code is written. Three properties keep the door open:
+No Snowflake or Spark code is written here. Three properties keep the door open:
 
 1. `payload` is opaque, so a Spark DataFrame passes through unchanged.
 2. `provenance` is a free-form dict with a `kind` discriminator, so a new
@@ -265,6 +300,33 @@ distinct subject set fits in driver memory. At the scale week 8 targeted
 (1M subjects) that is a list of a million strings, which is fine. Beyond that
 the interface would need revisiting — an acceptable limit to accept now rather
 than design around speculatively.
+
+### 8.1 Snowflake, the real production target
+
+The author's tables are in Snowflake. It is not built here (§2), but it is the
+source this interface must actually survive, so the constraints are recorded
+now rather than rediscovered later.
+
+- **Connection shape differs.** Account, user, warehouse, database, schema and
+  role — not a libpq DSN. Handled by §5's per-`kind` connection fields. The
+  credential-stripping rule is unchanged and absolute.
+- **Read-only is a role, not a transaction.** See §7.1.
+- **Table lineage may be authoritative rather than advisory.** Snowflake's
+  `ACCESS_HISTORY` reports base objects accessed, which would be a genuinely
+  better answer than a query plan — `referenced_tables_source:
+  "access_history"`, and not marked advisory.
+
+  **This needs verifying before any design depends on it.** `ACCESS_HISTORY` is
+  known to populate with material latency, so it is likely unreadable at load
+  time, when the provenance record is written. If that holds, the synchronous
+  fallback is `EXPLAIN USING JSON` with `referenced_tables_source: "explain"`,
+  identical in trust level to Postgres. A design that resolves lineage
+  after the fact — backfilling provenance once `ACCESS_HISTORY` catches up —
+  would break the hash-protected payload written at training time, so it is not
+  a straightforward option.
+- **Testing is the hard part**, and the reason Postgres goes first (§2).
+  Whatever the Snowflake test strategy turns out to be, it must not weaken the
+  100% coverage gate into a skip-if-no-credentials arrangement.
 
 ## 9. What this does not fix
 
@@ -302,6 +364,7 @@ Coverage targets:
 
 ## 11. Open items deliberately deferred
 
+- `SnowflakeSource` (§8.1) — the author's real data, next after this.
 - Lineage store on Postgres (concurrent writers across machines).
 - Streaming / distributed sources.
 - Audit export (JSON/PDF) and the docs site, both unrelated to this work.
