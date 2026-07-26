@@ -5,50 +5,34 @@ import hashlib
 import pickle
 from datetime import datetime, timezone
 
-import pandas as pd
-
-from consentml.errors import ConsentMLError
 from consentml.hashing import hash_subject_id
 from consentml.store import LineageStore
 
 
-def _find_dataframe(args, kwargs):
-    for value in list(args) + list(kwargs.values()):
-        if isinstance(value, pd.DataFrame):
-            return value
-    return None
-
-
-def track(*, data_source, subject_id_col, model_name, hash_subject_ids=True, db_path=None):
+def track(*, model_name, source, hash_subject_ids=True, db_path=None):
     """Record training-data lineage for the decorated training function.
 
-    The decorated function must accept a pandas DataFrame (positionally or by
-    keyword) containing `subject_id_col`, and return the trained model. The
-    model is hashed (SHA-256 of its pickle) and a lineage record is written
-    after training completes.
+    The source is loaded first and its payload passed to the decorated
+    function as the first positional argument -- the caller does not supply
+    training data. Loading first means a bad source fails immediately rather
+    than after training has already run.
+
+    The model is hashed (SHA-256 of its pickle) and the lineage record is
+    written only after training completes, so a training run that raises
+    leaves nothing behind.
     """
 
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            df = _find_dataframe(args, kwargs)
-            if df is None:
-                raise ConsentMLError(
-                    "No pandas DataFrame found in arguments to "
-                    f"'{fn.__name__}'; @track needs the training DataFrame."
-                )
-            if subject_id_col not in df.columns:
-                raise ConsentMLError(
-                    f"Subject ID column '{subject_id_col}' not found in "
-                    f"training DataFrame (columns: {list(df.columns)})."
-                )
-            subjects = df[subject_id_col].astype(str).unique()
+            result = source.load()
             subject_values = [
-                hash_subject_id(s) if hash_subject_ids else s for s in subjects
+                hash_subject_id(s) if hash_subject_ids else s
+                for s in result.subject_ids
             ]
 
             started_at = datetime.now(timezone.utc).isoformat()
-            model = fn(*args, **kwargs)
+            model = fn(result.payload, *args, **kwargs)
             finished_at = datetime.now(timezone.utc).isoformat()
 
             model_hash = hashlib.sha256(pickle.dumps(model)).hexdigest()
@@ -57,12 +41,7 @@ def track(*, data_source, subject_id_col, model_name, hash_subject_ids=True, db_
                 store.record_training_run(
                     model_name=model_name,
                     model_hash=model_hash,
-                    provenance={
-                        "kind": "dataframe",
-                        "label": data_source,
-                        "subject_id_col": subject_id_col,
-                        "n_rows": len(df),
-                    },
+                    provenance=result.provenance,
                     subject_ids_hashed=hash_subject_ids,
                     subject_id_values=subject_values,
                     started_at=started_at,

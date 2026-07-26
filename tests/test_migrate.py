@@ -44,11 +44,14 @@ def test_revoke_reports_are_identical_across_migration(legacy_db):
     whole point of this migration), so strict equality on the raw
     "provenance" field can't hold. But the property under test -- migration
     doesn't lose or alter the underlying provenance value -- must still be
-    checked, not discarded: assert the pre-migration raw string equals the
-    post-migration parsed "label", keyed by run_id so the comparison
-    survives any reordering. Everything else revoke() reports -- which
-    models were affected, their run_id/model_hash/timestamps, and the
-    recommended actions -- must match exactly."""
+    checked, not discarded: both before and after, revoke() reports
+    provenance as a dict (via _parse_provenance), and pre-migration that dict
+    already takes the "kind": "legacy" shape since a v0 data_source string is
+    not JSON. Assert the pre-migration label equals the post-migration
+    parsed label, keyed by run_id so the comparison survives any reordering.
+    Everything else revoke() reports -- which models were affected, their
+    run_id/model_hash/timestamps, and the recommended actions -- must match
+    exactly."""
     before = revoke(subject_id="h1", db_path=legacy_db, dry_run=True).to_dict()
     migrate_database(db_path=legacy_db)
     after = revoke(subject_id="h1", db_path=legacy_db, dry_run=True).to_dict()
@@ -61,7 +64,8 @@ def test_revoke_reports_are_identical_across_migration(legacy_db):
     }
     assert after_provenance.keys() == before_provenance.keys()
     for run_id, raw in before_provenance.items():
-        assert json.loads(after_provenance[run_id])["label"] == raw
+        assert raw["kind"] == "legacy"
+        assert after_provenance[run_id]["label"] == raw["label"]
 
     for report in (before, after):
         report.pop("generated_at")

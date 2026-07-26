@@ -4,6 +4,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
 from consentml.revoke import revoke
+from consentml.sources import DataFrameSource
 from consentml.store import GENESIS_HASH, LineageStore
 from consentml.track import track
 
@@ -24,17 +25,17 @@ def test_track_then_revoke_end_to_end(tmp_path):
         return model
 
     track(
-        data_source="postgres://prod/customers",
-        subject_id_col="email",
+        source=DataFrameSource(df, subject_id_col="email",
+                                label="postgres://prod/customers"),
         model_name="churn",
         db_path=db,
-    )(fit)(df)
+    )(fit)()
     track(
-        data_source="postgres://prod/customers",
-        subject_id_col="email",
+        source=DataFrameSource(df, subject_id_col="email",
+                                label="postgres://prod/customers"),
         model_name="upsell",
         db_path=db,
-    )(fit)(df)
+    )(fit)()
 
     report = revoke(subject_id="a@x.com", db_path=db)
 
