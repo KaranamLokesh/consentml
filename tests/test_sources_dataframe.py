@@ -1,3 +1,5 @@
+import dataclasses
+
 import pandas as pd
 import pytest
 
@@ -10,12 +12,12 @@ def test_source_result_is_frozen():
     assert result.payload == [1, 2]
     assert result.subject_ids == ["a"]
     assert result.provenance == {"kind": "x"}
-    try:
+    with pytest.raises(dataclasses.FrozenInstanceError):
         result.payload = [3]
-    except AttributeError:
-        pass
-    else:
-        raise AssertionError("SourceResult should be frozen")
+
+
+def test_provenance_defaults_to_empty_dict():
+    assert SourceResult(payload=None, subject_ids=[]).provenance == {}
 
 
 def test_any_object_with_load_satisfies_the_protocol():
@@ -72,5 +74,30 @@ def test_empty_frame_raises():
 
 
 def test_non_dataframe_raises():
-    with pytest.raises(ConsentMLError, match="DataFrame"):
+    # match must be specific to the isinstance-guard message, not just
+    # "DataFrame" -- the missing-column message also contains that word, so
+    # a loose match would still pass green even if the isinstance check were
+    # deleted and the mistaken object happened to have a `.columns` attribute
+    # (a realistic mistake given polars/Spark frames are on the roadmap).
+    with pytest.raises(ConsentMLError, match="needs a pandas DataFrame"):
         DataFrameSource([1, 2, 3], subject_id_col="pid").load()
+
+
+def test_null_subject_id_raises_object_dtype():
+    df = pd.DataFrame({"pid": ["P1", None, "P2"], "age": [30, 31, 40]})
+    with pytest.raises(ConsentMLError, match="null"):
+        DataFrameSource(df, subject_id_col="pid").load()
+
+
+def test_null_subject_id_raises_float_dtype():
+    df = pd.DataFrame({"pid": [1.0, float("nan"), 2.0], "age": [30, 31, 40]})
+    with pytest.raises(ConsentMLError, match="null"):
+        DataFrameSource(df, subject_id_col="pid").load()
+
+
+def test_null_subject_id_raises_nullable_int_dtype():
+    df = pd.DataFrame(
+        {"pid": pd.array([1, None, 2], dtype="Int64"), "age": [30, 31, 40]}
+    )
+    with pytest.raises(ConsentMLError, match="null"):
+        DataFrameSource(df, subject_id_col="pid").load()
