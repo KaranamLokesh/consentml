@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS subject_index (
     subject_pk INTEGER NOT NULL REFERENCES subjects(subject_pk)
 );
 
+-- Two indexes, not one: idx_si_subject serves revocation lookups
+-- (runs_for_subject_value joins subjects -> subject_index), idx_si_run
+-- serves subject_count_for_run, which verify_audit_log() calls once per
+-- training run. Dropping either turns its query into a full scan of
+-- subject_index -- fine at test scale, catastrophic on the
+-- many-runs/many-subjects databases this schema exists for. The extra
+-- index does eat into the storage savings from interning; that's a
+-- deliberate trade of some dedup win for verification staying fast at
+-- scale, not an oversight.
 CREATE INDEX IF NOT EXISTS idx_si_subject ON subject_index(subject_pk);
 CREATE INDEX IF NOT EXISTS idx_si_run ON subject_index(run_pk);
 

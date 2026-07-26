@@ -246,3 +246,21 @@ def test_cli_migrate_small_db_reports_growth_accurately(tmp_path, capsys, build_
     assert "0.0 MB -> 0.0 MB" not in out
     assert "KB" in out
     assert "fixed overhead" in out
+
+
+def test_format_bytes_sub_kilobyte_scale():
+    """Below 1 KB, _format_bytes uses a plain byte count.
+
+    Real database sizes never land here (SQLite's minimum page size already
+    exceeds 1024 bytes), so this branch is exercised directly against the
+    pure formatting function rather than through a contrived migration.
+    """
+    from consentml.cli import _format_bytes
+
+    assert _format_bytes(500) == "500 bytes"
+
+
+def test_format_bytes_megabyte_scale():
+    from consentml.cli import _format_bytes
+
+    assert _format_bytes(2 * 1024 * 1024) == "2.0 MB"

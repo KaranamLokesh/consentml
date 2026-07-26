@@ -25,6 +25,12 @@ Exit codes, so it can gate CI:
 | 1 | Read the database and found problems (including: no database there) |
 | 2 | Could not read the database at all |
 
+`verify` and `migrate` share this contract: `migrate` exits 1 when it refuses to
+migrate (including onto a missing database) and 0 once migrated or already
+current. `revoke` does not use it — it always reports what it found and exits
+0, whether or not the subject affected any models or the database exists yet;
+it only exits 2 if the database cannot be read at all.
+
 Verification never writes. It records no audit event of its own, and it will not
 create a database that isn't there — a mistyped `--db` reports a missing
 database rather than silently reporting a clean, empty one.
@@ -45,5 +51,24 @@ verifies; only a rewrite or truncation of history reports `head_mismatch`.
 
 This proves history up to the anchor point. It says nothing about entries
 appended after it — re-anchor regularly to narrow that window.
+
+## Upgrading an existing database
+
+Databases created before the interned-storage schema need a one-time upgrade:
+
+```bash
+consentml migrate --db lineage.db
+```
+
+Migration verifies the audit log before it starts and **refuses to run** if
+verification fails — rewriting a tampered database would launder the tampering.
+The new database is built alongside the original and only swapped in once it
+verifies clean, so a failure leaves the original untouched. The original is kept
+as `<name>.pre-migration.bak`; delete it once you are satisfied. Migration
+temporarily needs room for two copies of the database.
+
+Until a database is migrated it can be read but not written to, so `@track` and
+a recording `revoke()` will raise. `consentml verify` and
+`revoke(dry_run=True)` keep working.
 
 Status: pre-release (v0 in development). MIT license.
