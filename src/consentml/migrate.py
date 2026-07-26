@@ -108,7 +108,27 @@ def migrate_database(*, db_path=None, allow_unverified=False) -> MigrationResult
 
     Verifies before and after. Refuses to migrate a database that fails
     verification unless allow_unverified is set.
+
+    This function runs on attacker-controlled data and must never raise --
+    like verify_audit_log(), any failure is reported as a MigrationResult,
+    never a traceback. _migrate_database does the real work; every step
+    that touches the original database is already individually guarded
+    (sqlite3.DatabaseError, sqlite3.Error, OSError), so this outer catch is
+    a last-resort net for whatever that per-step analysis missed, not a
+    substitute for it.
     """
+    try:
+        return _migrate_database(db_path=db_path, allow_unverified=allow_unverified)
+    except Exception as exc:  # noqa: BLE001 -- last-resort net, see docstring
+        db = Path(db_path) if db_path is not None else default_db_path()
+        return MigrationResult(
+            migrated=False,
+            already_current=False,
+            error=f"unexpected error migrating {db}: {exc}",
+        )
+
+
+def _migrate_database(*, db_path=None, allow_unverified=False) -> MigrationResult:
     db = Path(db_path) if db_path is not None else default_db_path()
     if not db.exists():
         return MigrationResult(
