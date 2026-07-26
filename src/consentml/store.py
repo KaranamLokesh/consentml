@@ -30,13 +30,17 @@ _RUN_COLS = [
     "subject_ids_hashed", "n_subjects", "started_at", "finished_at",
 ]
 
-# Schema v0 predates the provenance column -- its training_runs table still
-# has data_source and subject_id_col, not provenance. Aliasing data_source AS
-# provenance (and dropping subject_id_col) lets every read path return the
-# same _RUN_COLS shape regardless of which on-disk schema version it's
-# reading, so dict(zip(_RUN_COLS, row)) below stays correct for legacy
-# databases too, without a parallel set of query strings for every caller.
-_RUN_COLS_V0 = [
+# Schema versions before 2 (both v0 and v1) predate the provenance column --
+# their training_runs table still has data_source and subject_id_col, not
+# provenance. Aliasing data_source AS provenance (and dropping
+# subject_id_col) lets every read path return the same _RUN_COLS shape
+# regardless of which on-disk schema version it's reading, so
+# dict(zip(_RUN_COLS, row)) below stays correct for legacy databases too,
+# without a parallel set of query strings for every caller. This is purely
+# about column *names* -- v1's subject_index is already the interned
+# run_pk/subject_pk layout, identical to v2's, so it must not be confused
+# with the v0-only join shape handled separately below.
+_RUN_COLS_LEGACY = [
     "run_id", "model_name", "model_hash", "data_source AS provenance",
     "subject_ids_hashed", "n_subjects", "started_at", "finished_at",
 ]
@@ -126,7 +130,7 @@ class LineageStore:
         self.schema_version = self._detect_schema()
 
     def _detect_schema(self) -> int:
-        """Return the schema version, creating a fresh v1 database if needed.
+        """Return the schema version, creating a fresh v2 database if needed.
 
         A legacy database and an empty file both report user_version 0 -- the
         old code never set it -- so the presence of training_runs is what tells
@@ -215,15 +219,19 @@ class LineageStore:
     def runs_for_subject_value(self, subject_id_value) -> list[dict]:
         """Training runs whose subject index contains the given stored value
         (a hash when subject_ids_hashed, else the raw ID)."""
+        # Column names: legacy (data_source/subject_id_col) below SCHEMA_VERSION,
+        # i.e. v0 and v1 both. Join shape: v0 only -- v1's subject_index is
+        # already the interned run_pk/subject_pk layout used by v2. These two
+        # facts don't share a condition, so they're branched separately.
+        run_cols = _RUN_COLS_LEGACY if self.schema_version < SCHEMA_VERSION else _RUN_COLS
+        cols = ", ".join(f"r.{c}" for c in run_cols)
         if self.schema_version == 0:
-            cols = ", ".join(f"r.{c}" for c in _RUN_COLS_V0)
             sql = (
                 f"SELECT {cols} FROM training_runs r "
                 "JOIN subject_index s ON s.run_id = r.run_id "
                 "WHERE s.subject_id_hash = ? ORDER BY r.started_at"
             )
         else:
-            cols = ", ".join(f"r.{c}" for c in _RUN_COLS)
             sql = (
                 f"SELECT {cols} FROM training_runs r "
                 "JOIN subject_index s ON s.run_pk = r.run_pk "
@@ -235,7 +243,8 @@ class LineageStore:
 
     def latest_run_for_model(self, model_name) -> dict | None:
         """The most recent training run (by started_at) for a model name."""
-        cols = ", ".join(_RUN_COLS_V0 if self.schema_version == 0 else _RUN_COLS)
+        run_cols = _RUN_COLS_LEGACY if self.schema_version < SCHEMA_VERSION else _RUN_COLS
+        cols = ", ".join(run_cols)
         row = self._conn.execute(
             f"SELECT {cols} FROM training_runs "
             "WHERE model_name = ? ORDER BY started_at DESC LIMIT 1",
@@ -245,7 +254,8 @@ class LineageStore:
 
     def run_by_id(self, run_id) -> dict | None:
         """The training run with this id, or None if it is absent."""
-        cols = ", ".join(_RUN_COLS_V0 if self.schema_version == 0 else _RUN_COLS)
+        run_cols = _RUN_COLS_LEGACY if self.schema_version < SCHEMA_VERSION else _RUN_COLS
+        cols = ", ".join(run_cols)
         row = self._conn.execute(
             f"SELECT {cols} FROM training_runs WHERE run_id = ?",
             (run_id,),
