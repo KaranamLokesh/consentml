@@ -17,8 +17,7 @@ def seeded_db(tmp_path):
         store.record_training_run(
             model_name="churn_v3",
             model_hash="beef",
-            data_source="postgres://prod/customers",
-            subject_id_col="email",
+            provenance={"kind": "dataframe", "label": "postgres://prod/customers"},
             subject_ids_hashed=True,
             subject_id_values=[hash_subject_id("a@x.com")],
             started_at="2026-07-01T00:00:00+00:00",
@@ -109,6 +108,17 @@ def test_cli_verify_expected_head_mismatch_exits_one(seeded_db, capsys):
 
 def test_cli_revoke_still_exits_zero(seeded_db, capsys):
     assert main(["revoke", "--subject-id", "a@x.com", "--db", str(seeded_db)]) == 0
+
+
+def test_cli_verify_notes_legacy_runs(legacy_db, capsys):
+    # legacy_db (see conftest.py) is a schema-v0 database whose audit
+    # payloads predate provenance hashing entirely, so verifying it must
+    # surface the note rather than silently reporting a clean bill of
+    # health for provenance it never checked.
+    exit_code = main(["verify", "--db", str(legacy_db)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "predate provenance hashing" in out
 
 
 def test_cli_verify_missing_db_exits_nonzero(tmp_path, capsys):

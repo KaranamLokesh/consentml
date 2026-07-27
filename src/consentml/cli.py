@@ -44,6 +44,11 @@ def _print_verify_summary(report):
         for f in report.findings:
             where = f"entry {f.entry_id}" if f.entry_id is not None else "tables"
             print(f"  - [{f.code}] {where}: {f.detail}")
+    if report.n_legacy_runs:
+        print(
+            f"note: {report.n_legacy_runs} run(s) predate provenance hashing; "
+            "their provenance was not verified."
+        )
     print(f"head: {report.head_hash}")
 
 

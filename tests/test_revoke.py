@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import pytest
 
@@ -20,8 +21,7 @@ def _seed_run(db, model_name, subjects, started_at, hashed=True):
         return store.record_training_run(
             model_name=model_name,
             model_hash="beef",
-            data_source="postgres://prod/customers",
-            subject_id_col="email",
+            provenance={"kind": "dataframe", "label": "postgres://prod/customers"},
             subject_ids_hashed=hashed,
             subject_id_values=values,
             started_at=started_at,
@@ -108,6 +108,39 @@ def test_public_api_exports_revoke():
 
     assert consentml.revoke is revoke
     assert consentml.AffectedModelsReport is AffectedModelsReport
+
+
+def test_revoke_reports_legacy_label_for_non_object_json_provenance(db):
+    """A provenance column can hold valid JSON that isn't an object -- e.g. a
+    legacy data_source that happens to be bare digits. _parse_provenance
+    must still treat that as legacy free text, not corruption."""
+    run_id = _seed_run(db, "m", ["a@x.com"], "2026-07-01T00:00:00+00:00")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE training_runs SET provenance = '42' WHERE run_id = ?", (run_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    report = revoke(subject_id="a@x.com", db_path=db, dry_run=True)
+    assert report.affected_models[0].provenance == {"kind": "legacy", "label": "42"}
+
+
+def test_revoke_reports_unreadable_for_non_text_provenance(db):
+    """A provenance column replaced with a BLOB (not text at all, e.g. by
+    tampering) must be reported as unreadable rather than crashing the
+    revocation report -- revoke() reports, it does not verify."""
+    run_id = _seed_run(db, "m", ["a@x.com"], "2026-07-01T00:00:00+00:00")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE training_runs SET provenance = ? WHERE run_id = ?",
+        (b"\xff\xfe", run_id),
+    )
+    conn.commit()
+    conn.close()
+
+    report = revoke(subject_id="a@x.com", db_path=db, dry_run=True)
+    assert report.affected_models[0].provenance == {"kind": "unreadable"}
 
 
 def test_revoke_dry_run_works_on_legacy_database(legacy_db):

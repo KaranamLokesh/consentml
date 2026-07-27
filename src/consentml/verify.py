@@ -16,7 +16,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from consentml.store import GENESIS_HASH, LineageStore, default_db_path
+from consentml.store import (
+    GENESIS_HASH,
+    LineageStore,
+    default_db_path,
+    provenance_hash,
+)
 
 _REQUIRED_KEYS = {
     "training_run": {"run_id", "model_name", "model_hash", "n_subjects"},
@@ -38,6 +43,7 @@ class VerificationReport:
     head_hash: str
     findings: list
     generated_at: str
+    n_legacy_runs: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +52,7 @@ class VerificationReport:
             "head_hash": self.head_hash,
             "findings": [asdict(f) for f in self.findings],
             "generated_at": self.generated_at,
+            "n_legacy_runs": self.n_legacy_runs,
         }
 
 
@@ -137,15 +144,24 @@ def _parse_payloads(entries) -> tuple[dict, list]:
     return parsed, findings
 
 
-def _check_references(entries, parsed, store) -> list:
+def _check_references(entries, parsed, store) -> tuple[list, int]:
     """Compare training_run entries against the live tables.
 
     Revocation entries are deliberately not cross-checked: their
     n_affected_runs was point-in-time and legitimately differs once later
     runs are recorded.
+
+    Returns (findings, n_legacy_runs). A legacy run is one whose audit payload
+    predates provenance hashing. Before migration its "provenance" is the
+    original free-text data_source, read live via a legacy column alias;
+    migration (consentml.migrate) backfills it into structured "legacy" JSON
+    without touching the already-hashed audit entry. Either way it is NOT
+    hash-protected, so it is counted and reported rather than silently
+    passing as if it had been checked.
     """
     findings = []
     logged_run_ids = set()
+    legacy_run_ids = set()
     for entry in entries:
         if entry["event_type"] != "training_run":
             continue
@@ -216,7 +232,7 @@ def _check_references(entries, parsed, store) -> list:
                     ),
                 )
             )
-        for field in ("model_hash", "n_subjects"):
+        for field in ("model_name", "model_hash", "n_subjects"):
             if run[field] != payload[field]:
                 findings.append(
                     VerificationFinding(
@@ -229,6 +245,53 @@ def _check_references(entries, parsed, store) -> list:
                         ),
                     )
                 )
+
+        if "provenance_sha256" in payload:
+            actual_hash = provenance_hash(run["provenance"])
+            # provenance_hash() returns None as a sentinel for "not
+            # verifiable text" (a BLOB, an int, ...), never as a real
+            # digest. It must never be allowed to compare equal to
+            # anything, including a payload whose provenance_sha256 was
+            # itself forged to JSON null -- `None == None` would otherwise
+            # report a clean bill of health for exactly the tampering this
+            # check exists to catch.
+            if actual_hash is None or actual_hash != payload["provenance_sha256"]:
+                findings.append(
+                    VerificationFinding(
+                        entry_id=entry["id"],
+                        code="provenance_modified",
+                        detail=(
+                            f"run {run_id}: provenance in training_runs does "
+                            "not match the hash recorded in the audit log"
+                        ),
+                    )
+                )
+        elif "data_source" in payload:
+            # Pre-v2 entry: its payload was hashed before provenance existed
+            # and must never be rewritten, or the hash chain over it would
+            # no longer match (migration backfills training_runs.provenance
+            # from this free-text field without touching the already-hashed
+            # audit entry) -- so there is nothing to check it against.
+            # Counted by run_id, not by entry, so a run with more than one
+            # legacy entry isn't reported as more than one unverified run.
+            # Reported so the report can say so rather than implying it
+            # verified something it did not.
+            legacy_run_ids.add(run_id)
+        else:
+            # Neither key: not a shape any schema version ever wrote. Must
+            # not fall into the legacy bucket, which would silently accept
+            # any payload missing provenance_sha256 as "merely old" instead
+            # of flagging it as the malformed payload it actually is.
+            findings.append(
+                VerificationFinding(
+                    entry_id=entry["id"],
+                    code="malformed_payload",
+                    detail=(
+                        f"entry {entry['id']} payload has neither "
+                        "provenance_sha256 nor data_source"
+                    ),
+                )
+            )
 
     # sorted() on raw run_id values would raise TypeError if training_runs
     # ever holds a mix of types (e.g. a BLOB run_id alongside normal TEXT
@@ -244,7 +307,7 @@ def _check_references(entries, parsed, store) -> list:
                 ),
             )
         )
-    return findings
+    return findings, len(legacy_run_ids)
 
 
 def _is_lineage_database(db) -> bool:
@@ -324,8 +387,8 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
         # file that plainly exists would go looking in the wrong place.
         # Checked with a strictly read-only connection, before
         # LineageStore ever touches the path, because LineageStore would
-        # provision a fresh empty v1 schema onto exactly this kind of file
-        # and then report a clean bill of health for it.
+        # provision a fresh empty current-version schema onto exactly this
+        # kind of file and then report a clean bill of health for it.
         return VerificationReport(
             ok=False,
             n_entries=0,
@@ -344,7 +407,8 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
         entries = store.audit_entries()
         parsed, findings = _parse_payloads(entries)
         findings += _check_chain(entries)
-        findings += _check_references(entries, parsed, store)
+        reference_findings, n_legacy = _check_references(entries, parsed, store)
+        findings += reference_findings
         head_hash = entries[-1]["entry_hash"] if entries else GENESIS_HASH
         if expected_head is not None:
             # expected_head is caller-supplied and may be any type, including
@@ -373,6 +437,7 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
             head_hash=head_hash,
             findings=findings,
             generated_at=datetime.now(timezone.utc).isoformat(),
+            n_legacy_runs=n_legacy,
         )
     finally:
         store.close()

@@ -4,6 +4,7 @@ revoke() never modifies training data or models. It reports which models a
 subject's data reached and records that the revocation request was processed.
 """
 
+import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
@@ -16,7 +17,7 @@ class AffectedModel:
     run_id: str
     model_name: str
     model_hash: str
-    data_source: str
+    provenance: dict
     started_at: str
     finished_at: str
     recommendation: str
@@ -38,6 +39,34 @@ class AffectedModelsReport:
             "recommended_actions": self.recommended_actions,
             "audit_log_entry_id": self.audit_log_entry_id,
         }
+
+
+def _parse_provenance(text):
+    """Provenance as a dict.
+
+    Two different things live in this column. A v2 database holds JSON. An
+    unmigrated v0/v1 database holds the old free-text data_source, aliased
+    into this key by the store's legacy column list -- that is not JSON, and
+    must not be reported as unreadable, because it is honest data that
+    simply predates the schema.
+
+    revoke() reports; it does not verify. A value that is neither of those
+    is a tampering signal, but reporting that is verify_audit_log()'s job --
+    here it must not crash a revocation report that is otherwise correct and
+    legally required.
+    """
+    if isinstance(text, str):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return {"kind": "legacy", "label": text}
+        if isinstance(parsed, dict):
+            return parsed
+        # Valid JSON but not an object -- e.g. a legacy data_source that
+        # happens to be bare digits. Still legacy free text, not corruption.
+        return {"kind": "legacy", "label": text}
+    # Not text at all: bytes from the store's lenient text_factory, or NULL.
+    return {"kind": "unreadable"}
 
 
 def revoke(*, subject_id, db_path=None, dry_run=False) -> AffectedModelsReport:
@@ -73,7 +102,7 @@ def revoke(*, subject_id, db_path=None, dry_run=False) -> AffectedModelsReport:
                     run_id=r["run_id"],
                     model_name=r["model_name"],
                     model_hash=r["model_hash"],
-                    data_source=r["data_source"],
+                    provenance=_parse_provenance(r["provenance"]),
                     started_at=r["started_at"],
                     finished_at=r["finished_at"],
                     recommendation=actions[r["model_name"]],

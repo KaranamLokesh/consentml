@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import sqlite3
 
@@ -26,7 +27,7 @@ def test_migrates_a_legacy_database(legacy_db):
     assert result.already_current is False
     s = LineageStore(db_path=legacy_db)
     try:
-        assert s.schema_version == 1
+        assert s.schema_version == 2
     finally:
         s.close()
 
@@ -38,11 +39,38 @@ def test_verification_clean_before_and_after(legacy_db):
 
 
 def test_revoke_reports_are_identical_across_migration(legacy_db):
+    """Migration is expected to change *how* provenance is represented (the
+    v0 free-text data_source becomes structured "legacy" JSON -- that's the
+    whole point of this migration), so strict equality on the raw
+    "provenance" field can't hold. But the property under test -- migration
+    doesn't lose or alter the underlying provenance value -- must still be
+    checked, not discarded: both before and after, revoke() reports
+    provenance as a dict (via _parse_provenance), and pre-migration that dict
+    already takes the "kind": "legacy" shape since a v0 data_source string is
+    not JSON. Assert the pre-migration label equals the post-migration
+    parsed label, keyed by run_id so the comparison survives any reordering.
+    Everything else revoke() reports -- which models were affected, their
+    run_id/model_hash/timestamps, and the recommended actions -- must match
+    exactly."""
     before = revoke(subject_id="h1", db_path=legacy_db, dry_run=True).to_dict()
     migrate_database(db_path=legacy_db)
     after = revoke(subject_id="h1", db_path=legacy_db, dry_run=True).to_dict()
+
+    before_provenance = {
+        m["run_id"]: m["provenance"] for m in before["affected_models"]
+    }
+    after_provenance = {
+        m["run_id"]: m["provenance"] for m in after["affected_models"]
+    }
+    assert after_provenance.keys() == before_provenance.keys()
+    for run_id, raw in before_provenance.items():
+        assert raw["kind"] == "legacy"
+        assert after_provenance[run_id]["label"] == raw["label"]
+
     for report in (before, after):
         report.pop("generated_at")
+        for model in report["affected_models"]:
+            model.pop("provenance")
     assert before == after
 
 
@@ -62,7 +90,25 @@ def test_is_idempotent(legacy_db):
     assert second.migrated is False
 
 
-def test_refuses_a_tampered_database(legacy_db):
+def test_refuses_a_tampered_database(legacy_db, monkeypatch):
+    # Pins that this is the PRE-migration gate that fires, not the
+    # post-migration one: today's _copy_into_v2 happens to carry the same
+    # subject_index tampering straight through, so the post-gate catches it
+    # too and produces an identical findings list and an equally untouched
+    # original -- the two gates are only redundant in effect *today*.
+    # _copy_into_v2 is exactly what future schema work changes, so without
+    # the pre-gate a tampered multi-GB database would get fully copied
+    # before rejection. The monkeypatch makes the test fail loudly if
+    # _copy_into_v2 is ever reached; the exact `error` string pins which
+    # gate actually produced the refusal.
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError(
+            "_copy_into_v2 was called; the pre-migration verification gate "
+            "did not stop the tampered database before copying"
+        )
+
+    monkeypatch.setattr(migrate_mod, "_copy_into_v2", _must_not_be_called)
+
     conn = sqlite3.connect(legacy_db)
     with conn:
         conn.execute("DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
@@ -73,6 +119,7 @@ def test_refuses_a_tampered_database(legacy_db):
 
     assert result.migrated is False
     assert "subject_count_mismatch" in [f.code for f in result.findings]
+    assert result.error == "database failed verification; refusing to migrate"
     assert _digest(legacy_db) == original  # byte-identical, untouched
     assert not (legacy_db.parent / (legacy_db.name + ".pre-migration.bak")).exists()
 
@@ -116,6 +163,7 @@ def test_audit_log_survives_byte_for_byte(legacy_db):
         finally:
             conn.close()
 
+    _widen_audit_log_id_gap(legacy_db)  # see its docstring
     before = rows(legacy_db)
     migrate_database(db_path=legacy_db)
     assert rows(legacy_db) == before
@@ -225,7 +273,7 @@ def test_row_count_mismatch_is_caught_and_refused(tmp_path, build_legacy):
     with no audit_log entry mentioning it either, is invisible to
     verify_audit_log()'s audit-log-anchored checks -- it never shows up as a
     subject_count_mismatch for any real run. The join-based copy in
-    _copy_into_v1 silently drops such a row (no match, no insert), which the
+    _copy_into_v2 silently drops such a row (no match, no insert), which the
     raw row-count comparison exists specifically to catch."""
     db = tmp_path / "legacy.db"
     build_legacy(db, runs=(("a", ("h1", "h2")),))
@@ -350,3 +398,120 @@ def test_finalize_failure_when_restore_also_fails(tmp_path, build_legacy, monkey
 
     assert result.migrated is False
     assert "could not be restored" in result.error
+
+
+def _provenances(db):
+    conn = sqlite3.connect(db)
+    try:
+        return [json.loads(r[0])
+                for r in conn.execute("SELECT provenance FROM training_runs")]
+    finally:
+        conn.close()
+
+
+def _legacy_columns_by_run_id(db):
+    """run_id -> (data_source, subject_id_col) as stored in a v0/v1 source
+    database, before migration touches it."""
+    conn = sqlite3.connect(db)
+    try:
+        return {
+            run_id: (data_source, subject_id_col)
+            for run_id, data_source, subject_id_col in conn.execute(
+                "SELECT run_id, data_source, subject_id_col FROM training_runs"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _provenance_by_run_id(db):
+    conn = sqlite3.connect(db)
+    try:
+        return {
+            run_id: json.loads(provenance)
+            for run_id, provenance in conn.execute(
+                "SELECT run_id, provenance FROM training_runs"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _widen_audit_log_id_gap(db):
+    """Renumber the last audit_log row to a non-contiguous id (7, skipping
+    3-6), so a test asserting id is preserved across migration can't pass
+    by coincidence. Every fixture in this suite happens to produce
+    contiguous AUTOINCREMENT ids starting at 1, which would otherwise mask
+    migration silently renumbering entries -- a real audit log can have
+    gaps (a rolled-back AUTOINCREMENT insert burns its id permanently), and
+    renumbering during migration would rewrite an entry's identity while
+    still reporting migrated=True and verifying ok=True."""
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "UPDATE audit_log SET id = 7 WHERE id = (SELECT MAX(id) FROM audit_log)"
+        )
+    conn.close()
+
+
+def test_v1_migrates_to_v2_with_legacy_provenance(v1_db):
+    result = migrate_database(db_path=v1_db)
+    assert result.migrated, result.error
+    conn = sqlite3.connect(v1_db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.close()
+    assert _provenances(v1_db) == [
+        {"kind": "legacy", "label": "postgres://prod/customers",
+         "subject_id_col": "email"},
+        {"kind": "legacy", "label": "postgres://prod/customers",
+         "subject_id_col": "email"},
+    ]
+
+
+def test_v0_migrates_straight_to_v2(legacy_db):
+    # The full-dict check matters here, not just "kind" -- a migration that
+    # silently dropped or corrupted the v0 data_source/subject_id_col would
+    # still leave every run's "kind" as "legacy" and pass a weaker check.
+    before = _legacy_columns_by_run_id(legacy_db)
+
+    result = migrate_database(db_path=legacy_db)
+
+    assert result.migrated, result.error
+    conn = sqlite3.connect(legacy_db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.close()
+    after = _provenance_by_run_id(legacy_db)
+    assert after.keys() == before.keys()
+    for run_id, (data_source, subject_id_col) in before.items():
+        assert after[run_id] == {
+            "kind": "legacy",
+            "label": data_source,
+            "subject_id_col": subject_id_col,
+        }
+
+
+def test_migration_leaves_the_audit_log_byte_identical(v1_db):
+    _widen_audit_log_id_gap(v1_db)  # see its docstring: ids must not be reproduced by coincidence
+    conn = sqlite3.connect(v1_db)
+    before = conn.execute(
+        "SELECT id, timestamp, event_type, payload, prev_hash, entry_hash "
+        "FROM audit_log ORDER BY id"
+    ).fetchall()
+    conn.close()
+
+    assert migrate_database(db_path=v1_db).migrated
+
+    conn = sqlite3.connect(v1_db)
+    after = conn.execute(
+        "SELECT id, timestamp, event_type, payload, prev_hash, entry_hash "
+        "FROM audit_log ORDER BY id"
+    ).fetchall()
+    conn.close()
+    assert after == before
+
+
+def test_migrated_database_verifies_clean_and_counts_legacy_runs(v1_db):
+    assert migrate_database(db_path=v1_db).migrated
+    report = verify_audit_log(db_path=v1_db)
+    assert report.ok, [f.detail for f in report.findings]
+    assert report.n_legacy_runs == 2

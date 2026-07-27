@@ -5,6 +5,84 @@ pipelines. Add one decorator to your training function; when a user revokes
 consent, ConsentML tells you which deployed models were trained on their data
 and produces a tamper-evident audit trail.
 
+## Tracking a training run
+
+ConsentML loads the training data, so the lineage it records cannot disagree
+with what the model actually trained on:
+
+```python
+from consentml import track
+from consentml.sources.postgres import PostgresSource
+
+@track(
+    model_name="readmission-risk",
+    source=PostgresSource(
+        dsn="postgresql://user:pw@db.internal/clinic",
+        query="""
+            SELECT p.patient_id, p.age, l.ldl, p.outcome
+            FROM patients p JOIN labs l USING (patient_id)
+        """,
+        subject_id_col="patient_id",
+    ),
+)
+def train(df):
+    return LogisticRegression().fit(df[["age", "ldl"]], df["outcome"])
+
+model = train()    # no argument: ConsentML supplies the data
+```
+
+`source=` is evaluated at decoration time, not at call time: `@track` cannot
+decorate a function that is later called against different data, since the
+source (and therefore the data it loads) is fixed when the decorator runs.
+
+Requires `pip install 'consentml[postgres]'`. Queries run in a read-only
+transaction; ConsentML never writes to the database it reads from. Credentials
+are never recorded — the stored provenance keeps host, port and database only.
+
+For data already in memory:
+
+```python
+from consentml.sources import DataFrameSource
+
+@track(model_name="m", source=DataFrameSource(df, subject_id_col="patient_id",
+                                              label="clinic.patients"))
+def train(df): ...
+```
+
+`label` is caller-asserted and recorded as such: ConsentML cannot verify where
+an in-memory frame came from, and the stored record says so.
+
+A null subject ID is refused by both sources. A null cannot be revoked, so
+recording one would inflate the run's subject count with a subject no
+revocation could ever match.
+
+### What provenance records
+
+Postgres runs are recorded with the exact query text and its SHA-256, plus the
+tables the query plan touched:
+
+```json
+{
+    "kind": "postgres",
+    "host": "db.internal",
+    "port": 5432,
+    "database": "clinic",
+    "query": "SELECT p.patient_id, p.age, l.ldl, p.outcome FROM patients p JOIN labs l USING (patient_id)",
+    "query_sha256": "ac80473d33489424...",
+    "referenced_tables": ["public.labs", "public.patients"],
+    "referenced_tables_source": "explain",
+    "n_rows": 3
+}
+```
+
+The query text is authoritative; `referenced_tables` is advisory — it comes
+from `EXPLAIN`, so a table the planner optimizes away will not appear.
+`referenced_tables_source` says which mechanism produced the list, or
+`"unavailable"` if `EXPLAIN` could not run.
+
+The SHA-256 of the whole provenance record goes into the hash-chained audit
+log, so editing provenance in the database is detected as `provenance_modified`.
+
 ## Verifying the audit trail
 
 ```bash
@@ -14,8 +92,11 @@ consentml verify --db lineage.db
 Verification checks three things: that every audit entry hashes to its recorded
 value, that the chain links correctly, and that the log still agrees with the
 live tables. That last check is the one that matters most — it catches a
-`subject_index` row deleted to hide that someone was in a training set, which
-the hash chain alone cannot see.
+`subject_index` row deleted to hide that someone was in a training set, or a
+`training_runs.provenance` edited after the fact (reported as
+`provenance_modified`), either of which the hash chain alone cannot see. Runs
+recorded before provenance was hash-protected are counted separately as
+`n_legacy_runs` rather than silently treated as checked.
 
 Exit codes, so it can gate CI:
 
@@ -54,7 +135,9 @@ appended after it — re-anchor regularly to narrow that window.
 
 ## Upgrading an existing database
 
-Databases created before the interned-storage schema need a one-time upgrade:
+Databases created on either of the two prior schemas need a one-time upgrade
+to the current one — the interned-storage layout, plus the `provenance`
+column described above:
 
 ```bash
 consentml migrate --db lineage.db
@@ -70,5 +153,12 @@ temporarily needs room for two copies of the database.
 Until a database is migrated it can be read but not written to, so `@track` and
 a recording `revoke()` will raise. `consentml verify` and
 `revoke(dry_run=True)` keep working.
+
+Migration backfills provenance from the old `data_source` string as
+`{"kind": "legacy", ...}` and **does not touch the audit log** — those entries
+were hashed over payloads containing `data_source`, and rewriting them would
+invalidate every entry hash. Runs migrated this way keep legacy guarantees:
+their provenance is not hash-protected, and `consentml verify` reports how many
+such runs it did not check rather than implying it did.
 
 Status: pre-release (v0 in development). MIT license.

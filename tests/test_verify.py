@@ -22,8 +22,7 @@ def _seed(db, n_runs=3):
             store.record_training_run(
                 model_name=f"model_{i}",
                 model_hash=f"hash_{i}",
-                data_source="postgres://prod/customers",
-                subject_id_col="email",
+                provenance={"kind": "dataframe", "label": "postgres://prod/customers"},
                 subject_ids_hashed=True,
                 subject_id_values=[f"s{i}a", f"s{i}b"],
                 started_at=f"2026-07-{i + 1:02d}T00:00:00+00:00",
@@ -103,7 +102,7 @@ def test_empty_file_is_reported_not_a_lineage_database_and_left_untouched(db):
     # An empty file *exists* and SQLite opens it happily as a valid, empty
     # database -- so it doesn't hit the missing_database check, and it's
     # genuinely readable, not an I/O failure. But LineageStore._detect_schema
-    # treats a training_runs-less file as "provision a fresh v1 schema
+    # treats a training_runs-less file as "provision a fresh v2 schema
     # here," which would silently turn this into an empty-but-valid lineage
     # database and then report ok=True.
     db.write_bytes(b"")
@@ -289,6 +288,19 @@ def test_deleted_run_is_detected(db):
     assert run_ids[0] in findings[0].detail
 
 
+def test_modified_model_name_is_detected(db):
+    """model_name sits outside subject_index and model_hash, but it's still
+    inside the hash-protected audit payload (_REQUIRED_KEYS requires it for
+    training_run) -- the identical argument this branch already made for
+    provenance. A revocation report is about which *model* trained on a
+    subject's data, so this is the field that matters most, not the least."""
+    run_ids = _seed(db, n_runs=1)
+    _sql(db, "UPDATE training_runs SET model_name = ? WHERE run_id = ?",
+         ("innocent_model", run_ids[0]))
+    report = verify_audit_log(db_path=db)
+    assert "run_modified" in _codes(report)
+
+
 def test_modified_model_hash_is_detected(db):
     run_ids = _seed(db, n_runs=1)
     _sql(db, "UPDATE training_runs SET model_hash = ? WHERE run_id = ?",
@@ -313,10 +325,10 @@ def test_unlogged_run_is_detected(db):
     _seed(db, n_runs=1)
     _sql(
         db,
-        "INSERT INTO training_runs (run_id, model_name, model_hash, data_source, "
-        "subject_id_col, subject_ids_hashed, n_subjects, started_at, finished_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("smuggled-run", "shadow", "h", "src", "email", 1, 0,
+        "INSERT INTO training_runs (run_id, model_name, model_hash, provenance, "
+        "subject_ids_hashed, n_subjects, started_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("smuggled-run", "shadow", "h", '{"kind": "dataframe", "label": "src"}', 1, 0,
          "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
     report = verify_audit_log(db_path=db)
@@ -332,8 +344,7 @@ def test_zero_subject_run_is_not_a_mismatch(db):
         store.record_training_run(
             model_name="empty",
             model_hash="h",
-            data_source="src",
-            subject_id_col="email",
+            provenance={"kind": "dataframe", "label": "src"},
             subject_ids_hashed=True,
             subject_id_values=[],
             started_at="2026-07-01T00:00:00+00:00",
@@ -424,19 +435,19 @@ def test_mixed_type_unlogged_run_ids_do_not_raise(db):
     LineageStore(db_path=db).close()
     _sql(
         db,
-        "INSERT INTO training_runs (run_id, model_name, model_hash, data_source, "
-        "subject_id_col, subject_ids_hashed, n_subjects, started_at, finished_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("text-run-id", "shadow-a", "h", "src", "email", 1, 0,
+        "INSERT INTO training_runs (run_id, model_name, model_hash, provenance, "
+        "subject_ids_hashed, n_subjects, started_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("text-run-id", "shadow-a", "h", '{"kind": "dataframe", "label": "src"}', 1, 0,
          "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
     _sql(
         db,
-        "INSERT INTO training_runs (run_id, model_name, model_hash, data_source, "
-        "subject_id_col, subject_ids_hashed, n_subjects, started_at, finished_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (b"\x00\x01blob-run-id", "shadow-b", "h", "src", "email", 1, 0,
-         "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
+        "INSERT INTO training_runs (run_id, model_name, model_hash, provenance, "
+        "subject_ids_hashed, n_subjects, started_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (b"\x00\x01blob-run-id", "shadow-b", "h", '{"kind": "dataframe", "label": "src"}',
+         1, 0, "2026-07-20T00:00:00+00:00", "2026-07-20T00:01:00+00:00"),
     )
     report = verify_audit_log(db_path=db)
     findings = [f for f in report.findings if f.code == "unlogged_run"]
@@ -614,3 +625,220 @@ def test_verify_detects_tampering_in_a_legacy_database(legacy_db):
     _sql(legacy_db, "DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
     report = verify_audit_log(db_path=legacy_db)
     assert "subject_count_mismatch" in _codes(report)
+
+
+def _one_run(db_path, provenance=None):
+    store = LineageStore(db_path=db_path)
+    store.record_training_run(
+        model_name="m",
+        model_hash="mh",
+        provenance=provenance or {"kind": "dataframe", "label": "x", "n_rows": 1},
+        subject_ids_hashed=True,
+        subject_id_values=["a"],
+        started_at="t0",
+        finished_at="t1",
+    )
+    store.close()
+
+
+def test_editing_provenance_is_detected(tmp_path):
+    db = tmp_path / "l.db"
+    _one_run(db)
+    assert verify_audit_log(db_path=db).ok
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE training_runs SET provenance = ?",
+        (json.dumps({"kind": "dataframe", "label": "somewhere-else", "n_rows": 1},
+                    sort_keys=True),),
+    )
+    conn.commit()
+    conn.close()
+
+    report = verify_audit_log(db_path=db)
+    assert not report.ok
+    assert [f.code for f in report.findings] == ["provenance_modified"]
+
+
+def test_provenance_replaced_with_a_blob_is_detected_not_raised(tmp_path):
+    db = tmp_path / "l.db"
+    _one_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE training_runs SET provenance = ?", (b"\xff\xfe",))
+    conn.commit()
+    conn.close()
+
+    report = verify_audit_log(db_path=db)
+    assert [f.code for f in report.findings] == ["provenance_modified"]
+
+
+def test_provenance_forged_to_null_does_not_verify_against_a_blob(tmp_path):
+    """provenance_hash() returns None for a BLOB it can't treat as text.
+    That None must never be allowed to compare equal to anything -- including
+    a payload whose provenance_sha256 was itself forged to JSON null, which
+    would otherwise let `None == None` slip through as a clean bill of
+    health for exactly this tampering."""
+    db = tmp_path / "l.db"
+    _one_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE training_runs SET provenance = ?", (b"\xff\xfe",))
+    # Forging provenance_sha256 to null also changes the payload text, so
+    # entry_hash has to be recomputed here too -- otherwise the tamper would
+    # be masked by (and reported as) entry_hash_mismatch instead of
+    # exercising the None-vs-None comparison this test targets.
+    entry_id, timestamp, event_type, payload, prev_hash = conn.execute(
+        "SELECT id, timestamp, event_type, payload, prev_hash FROM audit_log"
+    ).fetchone()
+    forged_payload = json.loads(payload)
+    forged_payload["provenance_sha256"] = None
+    new_payload = json.dumps(forged_payload, sort_keys=True)
+    new_hash = hashlib.sha256(
+        (prev_hash + timestamp + event_type + new_payload).encode("utf-8")
+    ).hexdigest()
+    conn.execute(
+        "UPDATE audit_log SET payload = ?, entry_hash = ? WHERE id = ?",
+        (new_payload, new_hash, entry_id),
+    )
+    conn.commit()
+    conn.close()
+
+    report = verify_audit_log(db_path=db)
+    assert not report.ok
+    assert [f.code for f in report.findings] == ["provenance_modified"]
+
+
+def test_provenance_undecodable_utf8_text_is_detected_not_raised(tmp_path):
+    """CAST(... AS TEXT) forces genuine TEXT storage class holding bytes that
+    aren't valid UTF-8 -- distinct from the BLOB case above, which sqlite3
+    returns as bytes without attempting to decode at all. Without a lenient
+    text_factory, reading this column raises sqlite3.OperationalError from
+    inside store.run_by_id() itself, before provenance_hash() ever gets a
+    chance to run -- turning a table-only tamper into what looks like an
+    unreadable database and sending the CLI down the exit-2 (I/O failure)
+    path. LineageStore's text_factory returns raw bytes for undecodable TEXT
+    instead, so this reaches provenance_hash() same as the BLOB case and
+    reports provenance_modified, naming the column that was actually
+    tampered with rather than misdiagnosing the run_id as bad."""
+    db = tmp_path / "l.db"
+    _one_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE training_runs SET provenance = CAST(x'fffe' AS TEXT)")
+    conn.commit()
+    conn.close()
+
+    report = verify_audit_log(db_path=db)
+    assert not report.ok
+    assert [f.code for f in report.findings] == ["provenance_modified"]
+    assert "provenance" in report.findings[0].detail
+
+
+def test_clean_v2_database_reports_no_legacy_runs(tmp_path):
+    db = tmp_path / "l.db"
+    _one_run(db)
+    report = verify_audit_log(db_path=db)
+    assert report.ok
+    assert report.n_legacy_runs == 0
+    assert report.to_dict()["n_legacy_runs"] == 0
+
+
+def _insert_legacy_training_run(db, run_id, model_hash="legacy-mh", n_subjects=0):
+    """Insert a training_runs row directly, bypassing LineageStore, the way
+    an already-migrated legacy run would look: current v2 columns
+    (including a populated provenance, per migrate.py's design intent of
+    backfilling it from the old data_source), but referenced by an audit
+    entry whose payload predates provenance hashing entirely."""
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "INSERT INTO training_runs (run_id, model_name, model_hash, "
+            "provenance, subject_ids_hashed, n_subjects, started_at, "
+            "finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, "legacy-m", model_hash,
+             '{"kind": "dataframe", "label": "postgres://prod/customers"}',
+             1, n_subjects, "2020-01-01T00:00:00+00:00", "2020-01-01T00:01:00+00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_legacy_payload_in_a_v2_database_is_counted_not_checked(tmp_path, append_entry):
+    """A single audit log can legitimately hold a MIX of payload shapes once
+    a future migration backfills old entries' training_runs rows alongside
+    new ones: pre-v2 entries carry data_source, post-v2 entries carry
+    provenance_sha256. This builds that mix directly (there's no public API
+    path to produce it yet): one ordinary v2 run plus one legacy run with
+    its own run_id and its own training_runs row -- not a second audit entry
+    bolted onto the v2 run's row, which would model a duplicate-log database
+    instead of a post-migration one. n_legacy_runs must count the one
+    genuinely-legacy run out of the two logged runs, and the report must
+    still be clean."""
+    db = tmp_path / "l.db"
+    _one_run(db)  # the ordinary v2 run
+    _insert_legacy_training_run(db, "legacy-run")
+
+    payload = json.dumps(
+        {
+            "run_id": "legacy-run",
+            "model_name": "legacy-m",
+            "model_hash": "legacy-mh",
+            "data_source": "postgres://prod/customers",
+            "n_subjects": 0,
+        },
+        sort_keys=True,
+    )
+    append_entry(db, "training_run", payload)
+
+    report = verify_audit_log(db_path=db)
+    assert report.ok
+    assert report.n_legacy_runs == 1
+
+
+def test_legacy_run_with_two_entries_is_counted_once(tmp_path, append_entry):
+    """n_legacy_runs counts distinct runs, not entries: a legacy run logged
+    twice (e.g. re-recorded, or simply two audit entries referencing the
+    same run_id) must still contribute 1 to the count, not 2."""
+    db = tmp_path / "l.db"
+    LineageStore(db_path=db).close()  # provision the v2 schema
+    _insert_legacy_training_run(db, "legacy-run")
+    payload = json.dumps(
+        {
+            "run_id": "legacy-run",
+            "model_name": "legacy-m",
+            "model_hash": "legacy-mh",
+            "data_source": "postgres://prod/customers",
+            "n_subjects": 0,
+        },
+        sort_keys=True,
+    )
+    append_entry(db, "training_run", payload)
+    append_entry(db, "training_run", payload)
+
+    report = verify_audit_log(db_path=db)
+    assert report.ok
+    assert report.n_legacy_runs == 1
+
+
+def test_payload_with_neither_provenance_key_is_malformed_not_legacy(tmp_path, append_entry):
+    """A payload lacking provenance_sha256 is only legacy if it carries the
+    one thing that ever made a payload lack it: data_source. Anything else
+    missing both keys is a shape no schema version ever wrote and must be
+    flagged as malformed, not silently folded into "merely old"."""
+    db = tmp_path / "l.db"
+    LineageStore(db_path=db).close()  # provision the v2 schema
+    _insert_legacy_training_run(db, "legacy-run")
+    payload = json.dumps(
+        {
+            "run_id": "legacy-run",
+            "model_name": "legacy-m",
+            "model_hash": "legacy-mh",
+            "n_subjects": 0,
+        },
+        sort_keys=True,
+    )
+    append_entry(db, "training_run", payload)
+
+    report = verify_audit_log(db_path=db)
+    assert not report.ok
+    assert [f.code for f in report.findings] == ["malformed_payload"]
+    assert report.n_legacy_runs == 0
