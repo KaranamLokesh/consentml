@@ -7,6 +7,7 @@ than a mock.
 
 import hashlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 
@@ -243,3 +244,52 @@ def build_v1():
     or a specific path -- mirrors the build_legacy fixture above, and for
     the same reason (no `from conftest import ...`)."""
     return build_v1_db
+
+
+@pytest.fixture(scope="session")
+def pg_dsn():
+    """DSN for the test Postgres.
+
+    Fails loudly rather than skipping. A skip-if-unavailable fixture would
+    let the connector's tests vanish from a run that still reports 100%
+    coverage, which is exactly the kind of quiet false clean this project
+    exists to prevent.
+    """
+    dsn = os.environ.get("CONSENTML_TEST_PG_DSN")
+    if not dsn:
+        raise RuntimeError(
+            "CONSENTML_TEST_PG_DSN is not set. Start the test database with "
+            "'docker compose -f docker-compose.test.yml up -d' and export "
+            "CONSENTML_TEST_PG_DSN=postgresql://postgres:consentml@localhost"
+            ":5432/consentml_test"
+        )
+    return dsn
+
+
+@pytest.fixture
+def pg_tables(pg_dsn):
+    """A patients/labs pair to join, dropped afterwards."""
+    import psycopg
+
+    with psycopg.connect(pg_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS labs, patients")
+            cur.execute(
+                "CREATE TABLE patients ("
+                "patient_id text PRIMARY KEY, age int, outcome int)"
+            )
+            cur.execute("CREATE TABLE labs (patient_id text, ldl int)")
+            cur.executemany(
+                "INSERT INTO patients VALUES (%s, %s, %s)",
+                [("P1", 30, 0), ("P2", 40, 1), ("P3", 50, 0)],
+            )
+            cur.executemany(
+                "INSERT INTO labs VALUES (%s, %s)",
+                [("P1", 100), ("P2", 120), ("P3", 140)],
+            )
+        conn.commit()
+    yield pg_dsn
+    with psycopg.connect(pg_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS labs, patients")
+        conn.commit()

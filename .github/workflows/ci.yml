@@ -8,6 +8,19 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: consentml
+          POSTGRES_DB: consentml_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +46,8 @@ jobs:
         # week 5; letting it slip silently is how the gate stops meaning
         # anything. If a line genuinely cannot be covered, argue it in review
         # rather than lowering this number.
+        env:
+          CONSENTML_TEST_PG_DSN: postgresql://postgres:consentml@localhost:5432/consentml_test
         run: |
           pytest --cov=consentml --cov-report=term-missing --cov-fail-under=100
 
