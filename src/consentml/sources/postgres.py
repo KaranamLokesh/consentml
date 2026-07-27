@@ -44,6 +44,49 @@ def _safe_conninfo(psycopg, dsn) -> dict:
     }
 
 
+class _ExplainUnavailable(Exception):
+    """EXPLAIN could not be run or parsed. Never reaches the caller."""
+
+
+def _explain_failed():
+    return _ExplainUnavailable()
+
+
+def _relations(node, found):
+    """Collect schema-qualified relation names from an EXPLAIN plan node.
+
+    Postgres reports the relations itself, so ConsentML never parses SQL.
+    The result is advisory: a table the planner optimizes away never appears
+    in the plan and so never appears here.
+    """
+    if isinstance(node, dict):
+        name = node.get("Relation Name")
+        if name:
+            schema = node.get("Schema", "public")
+            found.add(f"{schema}.{name}")
+        for value in node.values():
+            _relations(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _relations(item, found)
+    return found
+
+
+def _run_explain(cur, query):
+    """Return the raw EXPLAIN plan JSON, or raise _ExplainUnavailable.
+
+    VERBOSE is required, not cosmetic: without it Postgres omits the
+    "Schema" key from plan nodes entirely (confirmed against 14 locally),
+    so a table outside the search_path's default schema would silently
+    fall back to the "public" default in _relations and be misreported.
+    """
+    cur.execute("EXPLAIN (FORMAT JSON, VERBOSE) " + query)
+    row = cur.fetchone()
+    if not row or not row[0]:
+        raise _ExplainUnavailable()
+    return row[0]
+
+
 class PostgresSource:
     """Track a training set read from Postgres with arbitrary SELECT SQL."""
 
@@ -55,7 +98,7 @@ class PostgresSource:
         self._conninfo = _safe_conninfo(self._psycopg, dsn)
 
     def load(self) -> SourceResult:
-        rows, columns = self._fetch()
+        rows, columns, tables, mechanism = self._fetch()
         df = pd.DataFrame(rows, columns=columns)
         if self._subject_id_col not in df.columns:
             raise ConsentMLError(
@@ -92,9 +135,27 @@ class PostgresSource:
                 "query_sha256": hashlib.sha256(
                     self._query.encode("utf-8")
                 ).hexdigest(),
+                "referenced_tables": tables,
+                "referenced_tables_source": mechanism,
                 "n_rows": int(len(df)),
             },
         )
+
+    def _referenced_tables(self, cur):
+        """(sorted table list, mechanism) -- never raises.
+
+        A failed EXPLAIN must not fail the training run: this list is
+        advisory, and advisory data can never break the primary path. It
+        also aborts the surrounding transaction in Postgres, so the
+        rollback below is required for the real query to run afterwards.
+        """
+        psycopg = self._psycopg
+        try:
+            plan = _run_explain(cur, self._query)
+        except (_ExplainUnavailable, psycopg.Error):
+            cur.connection.rollback()
+            return None, "unavailable"
+        return sorted(_relations(plan, set())), "explain"
 
     def _fetch(self):
         psycopg = self._psycopg
@@ -106,7 +167,12 @@ class PostgresSource:
                 f"{self._conninfo['host']}:{self._conninfo['port']}: {exc}"
             ) from exc
         try:
+            # Set before any statement runs: psycopg only accepts this while
+            # no transaction is open. ConsentML reads training data; it must
+            # never be able to write to the system it is reading from.
+            conn.read_only = True
             with conn.cursor() as cur:
+                tables, mechanism = self._referenced_tables(cur)
                 try:
                     cur.execute(self._query)
                     rows = cur.fetchall()
@@ -115,6 +181,6 @@ class PostgresSource:
                     raise ConsentMLError(
                         f"the training query failed: {exc}"
                     ) from exc
-            return rows, columns
+            return rows, columns, tables, mechanism
         finally:
             conn.close()
