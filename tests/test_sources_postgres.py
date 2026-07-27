@@ -24,6 +24,22 @@ def test_subject_ids_are_distinct_and_stringified(pg_tables):
     assert sorted(result.subject_ids) == ["P1", "P2", "P3"]
 
 
+def test_subject_ids_are_stringified_for_a_non_text_column(pg_tables):
+    # Every other test here uses patient_id, a text column, so .astype(str)
+    # is never exercised: dropping it would still pass because a str column
+    # round-trips through astype(str) as itself. A uuid column -- the common
+    # Postgres primary key -- is what actually depends on the cast: without
+    # it, subject_ids holds uuid.UUID objects, which fails downstream at the
+    # store's sqlite3 insert (after training has already run), not here.
+    result = PostgresSource(
+        dsn=pg_tables,
+        query="SELECT md5(patient_id)::uuid AS pid, age FROM patients",
+        subject_id_col="pid",
+    ).load()
+    assert len(result.subject_ids) == 3
+    assert all(isinstance(s, str) for s in result.subject_ids)
+
+
 def test_dedupes_subject_ids_across_repeated_rows(pg_tables):
     # QUERY above is a 1:1 join, so it can never exercise .unique() -- every
     # patient_id already appears exactly once. This query deliberately
@@ -104,6 +120,30 @@ def test_null_subject_id_raises(pg_tables):
             query="SELECT NULL::text AS patient_id, age FROM patients",
             subject_id_col="patient_id",
         ).load()
+
+
+def test_credentials_never_appear_on_a_connection_failure():
+    # test_unreachable_host_raises_consentml_error below uses a passwordless
+    # DSN, so it can't pin the design spec's §10 requirement that credentials
+    # be absent "including on connection failure" -- there's no password in
+    # play for a leak to hide. This DSN carries a real username and password
+    # and never connects (port 1 on loopback), so it exercises exactly the
+    # failure path the spec is about: the current code builds its error
+    # message from self._conninfo (host/port only), never self._dsn, so
+    # neither credential appears in the raised error or its chained
+    # traceback. Nothing pins that this stays true, so this test does.
+    import traceback
+
+    with pytest.raises(ConsentMLError) as excinfo:
+        PostgresSource(
+            dsn="postgresql://sekret_user:sekret_pass@127.0.0.1:1/none",
+            query=QUERY,
+            subject_id_col="patient_id",
+        ).load()
+    exc = excinfo.value
+    full = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert "sekret_user" not in full
+    assert "sekret_pass" not in full
 
 
 def test_unreachable_host_raises_consentml_error(pg_tables):

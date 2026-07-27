@@ -42,13 +42,10 @@ class DataFrameSource:
                 "Training DataFrame has no rows; refusing to record a "
                 "training run over zero subjects."
             )
-        # A null subject ID cannot be revoked -- there is no value a later
-        # revocation request could ever match. Worse, .astype(str) below
-        # would turn it into a *distinct* phantom subject ("nan", "None", or
-        # "<NA>" depending on pandas version and dtype -- see the tests),
-        # silently inflating n_subjects with coverage that was never real.
-        # That is exactly the failure the empty-frame check above exists to
-        # prevent, just one row at a time instead of for the whole frame.
+        # See SourceResult.subject_ids in sources/base.py for the full
+        # contract (distinct, non-null, stringified) and why a null here
+        # matters -- this is one of two call sites (sources/postgres.py is
+        # the other) that enforce it.
         n_null = int(self._df[self._subject_id_col].isna().sum())
         if n_null:
             raise ConsentMLError(

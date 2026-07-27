@@ -19,7 +19,24 @@ class SourceResult:
     it, so a pandas DataFrame, a Spark DataFrame, or anything else works."""
 
     subject_ids: list
-    """Distinct subject identifiers, before hashing.
+    """The contract every Source.load() must uphold for this field:
+
+    - **Distinct**: one entry per subject, even if the underlying rows repeat
+      the same subject (e.g. a join or a UNION ALL). Sources dedupe with
+      .unique() for exactly this reason -- an undeduped list would inflate
+      n_subjects with rows that are not additional coverage.
+    - **Non-null**: a null subject ID cannot be revoked -- there is no value a
+      later revocation request could ever match. Worse, stringifying a null
+      (see below) turns it into a *distinct* phantom subject ("nan", "None",
+      or "<NA>" depending on pandas version and dtype), silently inflating
+      n_subjects with coverage that was never real. Sources must reject nulls
+      before they reach this list, not stringify them into it.
+    - **Stringified**: every element is already `str`, regardless of the
+      underlying column's type. A source that skips this (e.g. a Postgres
+      `uuid` column, or any non-text pandas dtype) hands the store a value
+      its SQL layer cannot bind, which fails *after* the training function
+      has already run -- exactly the split-observation failure this
+      interface exists to prevent (see the module docstring).
 
     Note: frozen=True stops attribute *reassignment* (result.subject_ids = ..)
     but the list object itself is still mutable in place. Sources return a

@@ -393,9 +393,10 @@ def test_audit_payload_carries_provenance_sha256_not_data_source(tmp_path):
 
 def test_provenance_hash_of_non_string_is_none():
     """provenance_hash() is exercised here directly against a non-str value
-    (nothing in this module's own call path can produce one): a later task
-    feeds it values read straight from the provenance column, which a
-    tampered database could hold as a BLOB or integer rather than TEXT."""
+    (nothing in this module's own call path can produce one): verify.py's
+    _check_references feeds it values read straight from the provenance
+    column, which a tampered database could hold as a BLOB or integer rather
+    than TEXT."""
     assert provenance_hash(123) is None
 
 

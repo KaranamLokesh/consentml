@@ -90,7 +90,25 @@ def test_is_idempotent(legacy_db):
     assert second.migrated is False
 
 
-def test_refuses_a_tampered_database(legacy_db):
+def test_refuses_a_tampered_database(legacy_db, monkeypatch):
+    # Pins that this is the PRE-migration gate that fires, not the
+    # post-migration one: today's _copy_into_v2 happens to carry the same
+    # subject_index tampering straight through, so the post-gate catches it
+    # too and produces an identical findings list and an equally untouched
+    # original -- the two gates are only redundant in effect *today*.
+    # _copy_into_v2 is exactly what future schema work changes, so without
+    # the pre-gate a tampered multi-GB database would get fully copied
+    # before rejection. The monkeypatch makes the test fail loudly if
+    # _copy_into_v2 is ever reached; the exact `error` string pins which
+    # gate actually produced the refusal.
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError(
+            "_copy_into_v2 was called; the pre-migration verification gate "
+            "did not stop the tampered database before copying"
+        )
+
+    monkeypatch.setattr(migrate_mod, "_copy_into_v2", _must_not_be_called)
+
     conn = sqlite3.connect(legacy_db)
     with conn:
         conn.execute("DELETE FROM subject_index WHERE subject_id_hash = ?", ("h1",))
@@ -101,6 +119,7 @@ def test_refuses_a_tampered_database(legacy_db):
 
     assert result.migrated is False
     assert "subject_count_mismatch" in [f.code for f in result.findings]
+    assert result.error == "database failed verification; refusing to migrate"
     assert _digest(legacy_db) == original  # byte-identical, untouched
     assert not (legacy_db.parent / (legacy_db.name + ".pre-migration.bak")).exists()
 

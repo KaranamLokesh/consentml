@@ -110,13 +110,12 @@ class PostgresSource:
                 "Query returned no rows; refusing to record a training run "
                 "over zero subjects."
             )
-        # A null subject ID cannot be revoked -- there is no value a later
-        # revocation request could ever match. Worse, .astype(str) below
-        # would turn it into a *distinct* phantom subject ("nan", "None", or
-        # "<NA>" depending on pandas version and dtype), silently inflating
-        # n_subjects with coverage that was never real. Same hazard as
-        # DataFrameSource, just arriving here as a SQL NULL instead of a
-        # missing value already in memory.
+        # See SourceResult.subject_ids in sources/base.py for the full
+        # contract (distinct, non-null, stringified) and why a null here
+        # matters -- this is one of two call sites (sources/dataframe.py is
+        # the other) that enforce it. Same hazard as DataFrameSource, just
+        # arriving here as a SQL NULL instead of a missing value already in
+        # memory.
         n_null = int(df[self._subject_id_col].isna().sum())
         if n_null:
             raise ConsentMLError(

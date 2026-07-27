@@ -1,7 +1,7 @@
 # Postgres connector: verified data provenance
 
 Date: 2026-07-26
-Status: approved, not yet implemented
+Status: implemented, 2026-07-27
 
 ## 1. Problem
 
@@ -175,10 +175,14 @@ record would carry account, warehouse, database and schema instead. Only
 across query-backed sources. Nothing in the core reads any of these fields;
 they are recorded, hashed, and reported.
 
-`referenced_tables` comes from `EXPLAIN (FORMAT JSON)` — Postgres reports the
-relations, so ConsentML never parses SQL. The list is **advisory**: tables the
-planner optimizes away will not appear. `query` remains the authoritative
-record of what ran. `referenced_tables` is sorted for stable hashing.
+`referenced_tables` comes from `EXPLAIN (FORMAT JSON, VERBOSE)` — Postgres
+reports the relations, so ConsentML never parses SQL. `VERBOSE` is
+load-bearing, not cosmetic: without it Postgres omits the `Schema` key from
+plan nodes entirely, so a table outside the `public` schema would silently
+report as `public.<name>` instead of its real schema. The list is
+**advisory**: tables the planner optimizes away will not appear. `query`
+remains the authoritative record of what ran. `referenced_tables` is sorted
+for stable hashing.
 
 `referenced_tables_source` names the mechanism rather than assuming one, so
 each engine declares how its list was obtained and how far it can be trusted.
@@ -190,7 +194,7 @@ authoritative one without knowing which engine produced it.
 `DataFrameSource`:
 
 ```json
-{"kind": "dataframe", "label": "clinic.patients", "n_rows": 20}
+{"kind": "dataframe", "label": "clinic.patients", "subject_id_col": "patient_id", "n_rows": 20}
 ```
 
 `label` is optional and explicitly caller-asserted. This is where the
@@ -214,14 +218,16 @@ hash-protected payload, verification recomputes it from the stored column.
 
 New finding code: `provenance_modified`.
 
-### 6.1 Migration v1 → v2
+### 6.1 Migration v0/v1 → v2
 
 Reuses the week-8 machinery: verify before starting, build alongside, atomic
-rename, keep `<name>.pre-migration.bak`, refuse on a failed pre-check.
+rename, keep `<name>.pre-migration.bak`, refuse on a failed pre-check. The
+same code path migrates a v0 database directly to v2 as well as v1 to v2 --
+there is no intermediate v0 → v1 → v2 hop.
 
-Backfill maps each old value to `{"kind": "legacy", "label": "<data_source>"}`.
-No invention: the old string is preserved verbatim under a kind that says where
-it came from.
+Backfill maps each old value to `{"kind": "legacy", "label": "<data_source>",
+"subject_id_col": "<subject_id_col>"}`. No invention: the old string is
+preserved verbatim under a kind that says where it came from.
 
 **The audit log is not touched.** Existing entries were hashed with
 `data_source` inside their payload; rewriting them would invalidate every entry
@@ -357,7 +363,7 @@ Coverage targets:
   does not fail the run
 - read-only enforcement: a write query is rejected
 - empty result, missing subject column, psycopg absent
-- v1 → v2 migration backfill produces `{"kind": "legacy", ...}`
+- v0/v1 → v2 migration backfill produces `{"kind": "legacy", ...}`
 - a mixed-payload audit log verifies clean, and `n_legacy_runs` is correct
 - `provenance_modified` fires when the provenance column is edited
 - `DataFrameSource` parity with the behavior `track.py` has today

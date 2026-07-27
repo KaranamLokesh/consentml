@@ -102,7 +102,7 @@ def test_empty_file_is_reported_not_a_lineage_database_and_left_untouched(db):
     # An empty file *exists* and SQLite opens it happily as a valid, empty
     # database -- so it doesn't hit the missing_database check, and it's
     # genuinely readable, not an I/O failure. But LineageStore._detect_schema
-    # treats a training_runs-less file as "provision a fresh v1 schema
+    # treats a training_runs-less file as "provision a fresh v2 schema
     # here," which would silently turn this into an empty-but-valid lineage
     # database and then report ok=True.
     db.write_bytes(b"")
@@ -286,6 +286,19 @@ def test_deleted_run_is_detected(db):
     findings = [f for f in report.findings if f.code == "missing_run"]
     assert len(findings) == 1
     assert run_ids[0] in findings[0].detail
+
+
+def test_modified_model_name_is_detected(db):
+    """model_name sits outside subject_index and model_hash, but it's still
+    inside the hash-protected audit payload (_REQUIRED_KEYS requires it for
+    training_run) -- the identical argument this branch already made for
+    provenance. A revocation report is about which *model* trained on a
+    subject's data, so this is the field that matters most, not the least."""
+    run_ids = _seed(db, n_runs=1)
+    _sql(db, "UPDATE training_runs SET model_name = ? WHERE run_id = ?",
+         ("innocent_model", run_ids[0]))
+    report = verify_audit_log(db_path=db)
+    assert "run_modified" in _codes(report)
 
 
 def test_modified_model_hash_is_detected(db):

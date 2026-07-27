@@ -31,6 +31,10 @@ def train(df):
 model = train()    # no argument: ConsentML supplies the data
 ```
 
+`source=` is evaluated at decoration time, not at call time: `@track` cannot
+decorate a function that is later called against different data, since the
+source (and therefore the data it loads) is fixed when the decorator runs.
+
 Requires `pip install 'consentml[postgres]'`. Queries run in a read-only
 transaction; ConsentML never writes to the database it reads from. Credentials
 are never recorded — the stored provenance keeps host, port and database only.

@@ -232,7 +232,7 @@ def _check_references(entries, parsed, store) -> tuple[list, int]:
                     ),
                 )
             )
-        for field in ("model_hash", "n_subjects"):
+        for field in ("model_name", "model_hash", "n_subjects"):
             if run[field] != payload[field]:
                 findings.append(
                     VerificationFinding(
