@@ -136,8 +136,11 @@ pip install consentml[pdf]
 ```
 
 Export never writes to the database, so it is safe to run against a copy of a
-production lineage store. Exit codes match `verify`: 0 clean, 1 problems found
-(the dossier is still written, and says so), 2 the database could not be read.
+production lineage store. Exit codes match `verify`: 0 clean; 1 problems
+found — the dossier is still written and reports them, unless there was no
+lineage database at the path, in which case nothing is written; 2 the
+database could not be read, or `--format pdf` was used without the extra
+installed.
 
 The dossier covers one subject. The audit log is a single global chain, so
 exporting all of it to answer one subject's request would disclose every other
