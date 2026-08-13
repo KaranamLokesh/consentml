@@ -3,6 +3,7 @@
 from consentml.errors import ConsentMLError
 from consentml.export import Dossier, build_dossier
 from consentml.migrate import MigrationResult, migrate_database
+from consentml.render import render_html, render_json
 from consentml.revoke import AffectedModel, AffectedModelsReport, revoke
 from consentml.sources import DataFrameSource, Source, SourceResult
 from consentml.track import track
@@ -30,5 +31,7 @@ __all__ = [
     "DataFrameSource",
     "Dossier",
     "build_dossier",
+    "render_html",
+    "render_json",
     "__version__",
 ]
