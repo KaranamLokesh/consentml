@@ -116,6 +116,33 @@ Verification never writes. It records no audit event of its own, and it will not
 create a database that isn't there — a mistyped `--db` reports a missing
 database rather than silently reporting a clean, empty one.
 
+### Export a dossier
+
+When a data subject exercises their right to erasure, `export` produces the
+document you file: which models learned from their data, what you recommended
+for each, when the request was processed, and whether the audit log backing it
+is intact.
+
+```bash
+consentml export --subject-id user@example.com --db lineage.db
+```
+
+Writes `consentml-dossier-<key>.html` — self-contained, opens in any browser,
+prints to PDF. `--format json` emits the same content machine-readably;
+`--format pdf` writes a PDF directly and needs the optional extra:
+
+```bash
+pip install consentml[pdf]
+```
+
+Export never writes to the database, so it is safe to run against a copy of a
+production lineage store. Exit codes match `verify`: 0 clean, 1 problems found
+(the dossier is still written, and says so), 2 the database could not be read.
+
+The dossier covers one subject. The audit log is a single global chain, so
+exporting all of it to answer one subject's request would disclose every other
+subject's activity.
+
 ## Anchoring
 
 A hash chain cannot detect an attacker who rewrites the whole log from genesis
