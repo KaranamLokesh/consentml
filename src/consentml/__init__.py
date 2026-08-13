@@ -1,6 +1,7 @@
 """ConsentML: training-data lineage and consent-revocation reporting."""
 
 from consentml.errors import ConsentMLError
+from consentml.export import Dossier, build_dossier
 from consentml.migrate import MigrationResult, migrate_database
 from consentml.revoke import AffectedModel, AffectedModelsReport, revoke
 from consentml.sources import DataFrameSource, Source, SourceResult
@@ -27,5 +28,7 @@ __all__ = [
     "Source",
     "SourceResult",
     "DataFrameSource",
+    "Dossier",
+    "build_dossier",
     "__version__",
 ]
