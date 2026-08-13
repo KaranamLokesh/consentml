@@ -202,6 +202,49 @@ def test_revocation_payload_that_is_valid_json_but_not_an_object_is_skipped(
     assert "malformed_payload" in {f.code for f in dossier.verification.findings}
 
 
+def test_unreadable_event_fields_are_marked_not_crashed_on(seeded_db):
+    """A tampered timestamp must not take the whole dossier down.
+
+    The store's lenient text_factory returns bytes for TEXT that does not
+    decode, and json.dumps() raises TypeError on bytes -- so `--format json`
+    crashed on a database `--format html` rendered fine. str(b'\\xff') would
+    stop the crash and print b'\\xff' into a compliance document as if it
+    were the recorded time; the marker says what is true instead. The
+    tampering itself is not being hidden: verification reports it as its own
+    finding in the same dossier.
+    """
+    import json
+    import sqlite3
+
+    from consentml.render import render_html, render_json
+    from consentml.revoke import revoke
+
+    revoke(subject_id="a@x.com", db_path=seeded_db)
+    # b@x.com's revocation is appended after a@x.com's, so tampering with
+    # a@x.com's entry leaves the *head* entry's hash readable. That keeps
+    # this test on _revocation_events_for: a bytes head_hash is a separate
+    # crash, in verify.py, that this fix does not claim to address.
+    revoke(subject_id="b@x.com", db_path=seeded_db)
+    conn = sqlite3.connect(seeded_db)
+    conn.execute(
+        "UPDATE audit_log SET timestamp = CAST(x'ff' AS TEXT), "
+        "entry_hash = CAST(x'ff' AS TEXT) "
+        "WHERE id = (SELECT min(id) FROM audit_log WHERE event_type = 'revocation')"
+    )
+    conn.commit()
+    conn.close()
+
+    dossier = build_dossier(subject_id="a@x.com", db_path=seeded_db)
+    event = dossier.revocation_events[0]
+    assert event["timestamp"] == "unreadable - not readable text"
+    assert event["entry_hash"] == "unreadable - not readable text"
+
+    # The renderer that used to crash, and the one that used to disagree.
+    assert json.loads(render_json(dossier))["revocation_events"] == [event]
+    assert "unreadable - not readable text" in render_html(dossier)
+    assert not dossier.verification.ok
+
+
 def test_dossier_to_dict_is_json_serializable(seeded_db):
     import json
 

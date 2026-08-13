@@ -57,6 +57,27 @@ class Dossier:
         }
 
 
+def _text_or_marker(value) -> str:
+    """A str unchanged; anything else an explicit marker.
+
+    The store's lenient text_factory hands back bytes for TEXT columns that
+    do not decode, so an audit entry's timestamp or hash can be bytes on a
+    tampered database. Those values are copied into the dossier, and
+    json.dumps() raises TypeError on bytes -- render_json() crashed on a
+    database render_html() rendered fine.
+
+    str(value) would fix the crash and print b'\\xff' into a compliance
+    document as though it were the recorded timestamp. This says what is
+    true instead, mirroring how revoke._parse_provenance() reports
+    unreadable provenance as {"kind": "unreadable"}. Nothing is hidden by
+    doing so: verification reports the same tampering as its own finding, in
+    section 1 of the same document.
+    """
+    if isinstance(value, str):
+        return value
+    return "unreadable - not readable text"
+
+
 def _revocation_events_for(store, subject_key) -> list:
     """This subject's revocation events, oldest first.
 
@@ -83,11 +104,11 @@ def _revocation_events_for(store, subject_key) -> list:
         events.append(
             {
                 "entry_id": entry["id"],
-                "timestamp": entry["timestamp"],
+                "timestamp": _text_or_marker(entry["timestamp"]),
                 "subject_key": payload["subject_key"],
                 "n_affected_runs": payload.get("n_affected_runs"),
                 "recommended_actions": payload.get("recommended_actions"),
-                "entry_hash": entry["entry_hash"],
+                "entry_hash": _text_or_marker(entry["entry_hash"]),
             }
         )
     return events
