@@ -210,3 +210,143 @@ def test_render_html_dumps_provenance_that_has_no_label(tmp_path):
     html = render_html(build_dossier(subject_id="a@x.com", db_path=db))
     assert "public.customers" in html
     assert "SELECT email FROM customers" in html
+
+
+def test_render_pdf_produces_a_pdf(dossier):
+    from consentml.render import render_pdf
+
+    data = render_pdf(dossier)
+    assert data.startswith(b"%PDF")
+
+
+def test_render_pdf_without_the_extra_names_the_install_command(dossier, monkeypatch):
+    """The optional dependency is checked at call time, with a fix in the
+    message -- an ImportError traceback mentioning 'reportlab' does not tell
+    an operator what to type."""
+    import builtins
+
+    from consentml.errors import ConsentMLError
+    from consentml.render import render_pdf
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("reportlab"):
+            raise ImportError("No module named 'reportlab'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ConsentMLError) as excinfo:
+        render_pdf(dossier)
+    assert "pip install consentml[pdf]" in str(excinfo.value)
+
+
+def test_render_pdf_lists_recorded_revocation_events(tmp_path):
+    from consentml.render import render_pdf
+    from consentml.revoke import revoke
+
+    db = tmp_path / "lineage.db"
+    store = LineageStore(db_path=db)
+    try:
+        store.record_training_run(
+            model_name="churn_v3",
+            model_hash="beef",
+            provenance={"kind": "dataframe", "label": "w://c"},
+            subject_ids_hashed=True,
+            subject_id_values=[hash_subject_id("a@x.com")],
+            started_at="2026-07-01T00:00:00+00:00",
+            finished_at="2026-07-01T00:01:00+00:00",
+        )
+    finally:
+        store.close()
+    revoke(subject_id="a@x.com", db_path=db)
+
+    data = render_pdf(build_dossier(subject_id="a@x.com", db_path=db))
+    assert data.startswith(b"%PDF")
+
+
+def test_render_pdf_handles_a_dossier_with_no_models(tmp_path):
+    from consentml.render import render_pdf
+
+    db = tmp_path / "lineage.db"
+    LineageStore(db_path=db).close()
+    data = render_pdf(build_dossier(subject_id="nobody@x.com", db_path=db))
+    assert data.startswith(b"%PDF")
+
+
+def test_render_pdf_handles_a_failed_verification(tmp_path):
+    from consentml.render import render_pdf
+
+    data = render_pdf(build_dossier(subject_id="a@x.com", db_path=tmp_path / "no.db"))
+    assert data.startswith(b"%PDF")
+
+
+def test_render_pdf_handles_legacy_caveats(legacy_db):
+    """A v0 database renders, and exercises the n_legacy_runs caveat branch.
+
+    Legacy provenance is free text that _parse_provenance normalizes to
+    {"kind": "legacy", "label": ...}, so this covers the label branch of
+    _plain_provenance, not the unreadable one -- that has its own test below.
+    """
+    from consentml.render import render_pdf
+
+    data = render_pdf(build_dossier(subject_id="h1", db_path=legacy_db))
+    assert data.startswith(b"%PDF")
+
+
+def test_render_pdf_handles_unreadable_provenance(tmp_path):
+    import sqlite3
+
+    from consentml.render import render_pdf
+
+    db = tmp_path / "lineage.db"
+    store = LineageStore(db_path=db)
+    try:
+        store.record_training_run(
+            model_name="churn_v3",
+            model_hash="beef",
+            provenance={"kind": "dataframe", "label": "w://c"},
+            subject_ids_hashed=True,
+            subject_id_values=[hash_subject_id("a@x.com")],
+            started_at="2026-07-01T00:00:00+00:00",
+            finished_at="2026-07-01T00:01:00+00:00",
+        )
+    finally:
+        store.close()
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE training_runs SET provenance = X'ff'")
+    conn.commit()
+    conn.close()
+
+    data = render_pdf(build_dossier(subject_id="a@x.com", db_path=db))
+    assert data.startswith(b"%PDF")
+
+
+def test_render_pdf_dumps_provenance_that_has_no_label(tmp_path):
+    """The PostgresSource provenance shape, which carries no 'label'."""
+    from consentml.render import render_pdf
+
+    db = tmp_path / "lineage.db"
+    store = LineageStore(db_path=db)
+    try:
+        store.record_training_run(
+            model_name="churn_v3",
+            model_hash="beef",
+            provenance={
+                "kind": "postgres",
+                "host": "prod",
+                "query": "SELECT email FROM customers",
+                "referenced_tables": ["public.customers"],
+                "n_rows": 1,
+            },
+            subject_ids_hashed=True,
+            subject_id_values=[hash_subject_id("a@x.com")],
+            started_at="2026-07-01T00:00:00+00:00",
+            finished_at="2026-07-01T00:01:00+00:00",
+        )
+    finally:
+        store.close()
+
+    data = render_pdf(build_dossier(subject_id="a@x.com", db_path=db))
+    assert data.startswith(b"%PDF")

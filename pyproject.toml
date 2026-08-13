@@ -13,6 +13,7 @@ dependencies = ["pandas>=2.0"]
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
+pdf = ["reportlab>=4.0"]
 dev = [
     "pytest>=8",
     "pytest-cov",
@@ -22,6 +23,8 @@ dev = [
     "nbformat",
     "ipykernel",
     "psycopg[binary]>=3.1",
+    # Exercises the --format pdf path; the extra itself is optional at runtime.
+    "reportlab>=4.0",
 ]
 
 [project.scripts]

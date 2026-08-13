@@ -15,6 +15,8 @@ injection vector.
 import html
 import json
 
+from consentml.errors import ConsentMLError
+
 _CSS = """
 body { font-family: -apple-system, Segoe UI, Roboto, sans-serif;
        margin: 2rem auto; max-width: 50rem; line-height: 1.5; color: #111; }
@@ -180,3 +182,181 @@ it identifies which models a data subject's data reached and records what the
 operator decided. It does not modify models or delete data.</footer>
 </body></html>
 """
+
+
+def _plain_provenance(provenance) -> str:
+    """Provenance as plain text, for the PDF renderer.
+
+    Separate from _provenance_cell because reportlab paragraphs take a
+    minimal markup dialect, not HTML -- reusing the HTML version would emit
+    literal <em> tags into the document.
+    """
+    if provenance.get("kind") == "unreadable":
+        return "unreadable - provenance is not readable text"
+    label = provenance.get("label")
+    if label is not None:
+        return str(label)
+    return json.dumps(provenance, sort_keys=True)
+
+
+def render_pdf(dossier) -> bytes:
+    """The dossier as a PDF. Requires the optional [pdf] extra.
+
+    reportlab is imported here rather than at module scope so that importing
+    consentml -- or rendering HTML -- never requires the extra. The
+    ImportError is translated into a ConsentMLError naming the exact install
+    command, because a raw traceback mentioning 'reportlab' does not tell an
+    operator what to do about it.
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import (
+            Paragraph,
+            SimpleDocTemplate,
+            Spacer,
+            Table,
+            TableStyle,
+        )
+    except ImportError as exc:
+        raise ConsentMLError(
+            "PDF output needs the optional 'pdf' extra: "
+            "pip install consentml[pdf]"
+        ) from exc
+
+    import io
+
+    styles = getSampleStyleSheet()
+    body = styles["BodyText"]
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=LETTER,
+        title=f"Consent revocation dossier - {dossier.subject_id}",
+        leftMargin=0.9 * inch,
+        rightMargin=0.9 * inch,
+    )
+
+    story = [
+        Paragraph("Consent revocation dossier", styles["Title"]),
+        Paragraph(
+            f"Response to the erasure request from "
+            f"<b>{_e(dossier.subject_id)}</b>",
+            body,
+        ),
+        Paragraph(f"Subject key (SHA-256): {_e(dossier.subject_key)}", body),
+        Spacer(1, 0.25 * inch),
+        Paragraph("1. Audit log integrity", styles["Heading2"]),
+    ]
+
+    if not dossier.database_found:
+        story.append(
+            Paragraph(
+                "<b>No lineage database was read.</b> "
+                + "; ".join(_e(f.detail) for f in dossier.verification.findings),
+                body,
+            )
+        )
+    elif dossier.verification.ok:
+        story.append(
+            Paragraph(
+                f"<b>Audit log VERIFIED.</b> {dossier.verification.n_entries} "
+                "entries; hash chain intact and consistent with the lineage "
+                "tables.",
+                body,
+            )
+        )
+    else:
+        story.append(
+            Paragraph(
+                "<b>Audit log FAILED verification.</b> This log has been "
+                "modified since it was written.",
+                body,
+            )
+        )
+        for f in dossier.verification.findings:
+            story.append(Paragraph(f"- {_e(f.code)}: {_e(f.detail)}", body))
+
+    story.append(Paragraph(f"Head hash: {_e(dossier.head_hash)}", body))
+    if dossier.n_legacy_runs:
+        story.append(
+            Paragraph(
+                f"<b>Caveat:</b> {dossier.n_legacy_runs} training run(s) "
+                "predate provenance hashing. Their training data source is "
+                "not covered by the hash chain and was not verified.",
+                body,
+            )
+        )
+
+    story += [
+        Spacer(1, 0.2 * inch),
+        Paragraph("2. Models trained on this subject's data", styles["Heading2"]),
+    ]
+    if not dossier.affected_models:
+        story.append(
+            Paragraph(
+                "No models were trained on this data subject's data. No "
+                "remediation is required.",
+                body,
+            )
+        )
+    else:
+        rows = [["Model", "Training data", "Trained at", "Recommendation"]]
+        rows += [
+            [
+                Paragraph(_e(m.model_name), body),
+                Paragraph(_e(_plain_provenance(m.provenance)), body),
+                Paragraph(_e(m.started_at), body),
+                Paragraph(_e(m.recommendation), body),
+            ]
+            for m in dossier.affected_models
+        ]
+        table = Table(rows, colWidths=[1.5 * inch, 2.2 * inch, 1.6 * inch, 1.4 * inch])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ]
+            )
+        )
+        story.append(table)
+
+    story += [
+        Spacer(1, 0.2 * inch),
+        Paragraph("3. Recorded processing of this request", styles["Heading2"]),
+    ]
+    if not dossier.revocation_events:
+        story.append(
+            Paragraph(
+                "No revocation event has been recorded for this subject.", body
+            )
+        )
+    else:
+        for e in dossier.revocation_events:
+            story.append(
+                Paragraph(
+                    f"{_e(e['timestamp'])} - {_e(e['n_affected_runs'])} "
+                    f"affected run(s) - entry hash {_e(e['entry_hash'])}",
+                    body,
+                )
+            )
+
+    story += [
+        Spacer(1, 0.3 * inch),
+        Paragraph(
+            f"Generated {_e(dossier.generated_at)} by ConsentML "
+            f"{_e(dossier.consentml_version)}. ConsentML is a lineage and "
+            "reporting tool: it identifies which models a data subject's data "
+            "reached and records what the operator decided. It does not modify "
+            "models or delete data.",
+            styles["Italic"],
+        ),
+    ]
+
+    doc.build(story)
+    return buffer.getvalue()
