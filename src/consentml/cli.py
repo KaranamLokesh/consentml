@@ -149,7 +149,11 @@ def _run_export(args) -> int:
         if isinstance(payload, bytes):
             out.write_bytes(payload)
         else:
-            out.write_text(payload)
+            # Explicit, not the platform default: render_html() emits U+2014
+            # and declares <meta charset="utf-8">, so on a non-UTF-8 locale
+            # the bytes would contradict the declaration, and a non-ASCII
+            # model name would raise UnicodeEncodeError instead of writing.
+            out.write_text(payload, encoding="utf-8")
         # Absolute, not just `out`: a relative default filename printed
         # relative to the cwd is easy to lose track of once an operator
         # pipes this into a ticket or a shell script that changes directory.

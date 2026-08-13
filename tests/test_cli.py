@@ -305,6 +305,48 @@ def test_cli_export_honors_out(seeded_db, tmp_path):
     assert out.exists()
 
 
+def test_cli_export_writes_utf8_under_a_non_utf8_locale(seeded_db, tmp_path):
+    """The file's bytes must match the charset the document declares.
+
+    render_html() emits U+2014 and declares <meta charset="utf-8">, so
+    writing at the platform default encoding produces a file contradicting
+    its own declaration -- and on an ASCII locale raises UnicodeEncodeError
+    instead of writing anything at all.
+
+    Run in a subprocess under LC_ALL=C because the default encoding is fixed
+    at interpreter start and cannot be changed from inside the test; on a
+    developer's UTF-8 machine an in-process test passes either way, which is
+    exactly the kind of test that lets this ship.
+    """
+    import os
+    import subprocess
+    import sys
+
+    out = tmp_path / "dossier.html"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from consentml.cli import main; sys.exit(main(sys.argv[1:]))",
+            "export",
+            "--subject-id",
+            "a@x.com",
+            "--db",
+            str(seeded_db),
+            "--out",
+            str(out),
+        ],
+        env={**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0",
+             "PYTHONCOERCECLOCALE": "0"},
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    text = out.read_bytes().decode("utf-8")  # strict: fails on mojibake
+    assert "—" in text
+    assert 'charset="utf-8"' in text
+
+
 def test_cli_export_json_to_stdout(seeded_db, capsys):
     exit_code = main(
         [
