@@ -274,3 +274,131 @@ def test_format_bytes_megabyte_scale():
     from consentml.cli import _format_bytes
 
     assert _format_bytes(2 * 1024 * 1024) == "2.0 MB"
+
+
+def test_cli_export_writes_html_by_default(seeded_db, tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    exit_code = main(["export", "--subject-id", "a@x.com", "--db", str(seeded_db)])
+    assert exit_code == 0
+
+    key = hash_subject_id("a@x.com")
+    written = tmp_path / f"consentml-dossier-{key[:12]}.html"
+    assert written.exists()
+    assert "churn_v3" in written.read_text()
+    assert str(written) in capsys.readouterr().out
+
+
+def test_cli_export_default_filename_uses_the_hash_not_the_raw_id(
+    seeded_db, tmp_path, monkeypatch
+):
+    """The raw identifier belongs in the document, not in a directory listing."""
+    monkeypatch.chdir(tmp_path)
+    main(["export", "--subject-id", "a@x.com", "--db", str(seeded_db)])
+    assert not any("a@x.com" in p.name for p in tmp_path.iterdir())
+
+
+def test_cli_export_honors_out(seeded_db, tmp_path):
+    out = tmp_path / "dossier.html"
+    assert main(
+        ["export", "--subject-id", "a@x.com", "--db", str(seeded_db), "--out", str(out)]
+    ) == 0
+    assert out.exists()
+
+
+def test_cli_export_json_to_stdout(seeded_db, capsys):
+    exit_code = main(
+        [
+            "export", "--subject-id", "a@x.com", "--db", str(seeded_db),
+            "--format", "json", "--out", "-",
+        ]
+    )
+    assert exit_code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["subject_id"] == "a@x.com"
+    assert data["affected_models"][0]["model_name"] == "churn_v3"
+
+
+def test_cli_export_pdf_writes_a_pdf(seeded_db, tmp_path):
+    out = tmp_path / "dossier.pdf"
+    exit_code = main(
+        [
+            "export", "--subject-id", "a@x.com", "--db", str(seeded_db),
+            "--format", "pdf", "--out", str(out),
+        ]
+    )
+    assert exit_code == 0
+    assert out.read_bytes().startswith(b"%PDF")
+
+
+def test_cli_export_pdf_refuses_stdout(seeded_db, capsys):
+    exit_code = main(
+        [
+            "export", "--subject-id", "a@x.com", "--db", str(seeded_db),
+            "--format", "pdf", "--out", "-",
+        ]
+    )
+    assert exit_code == 2
+    assert "binary" in capsys.readouterr().err.lower()
+
+
+def test_cli_export_exits_1_on_a_tampered_log(seeded_db, tmp_path):
+    conn = sqlite3.connect(seeded_db)
+    conn.execute("UPDATE audit_log SET payload = replace(payload, 'churn', 'x')")
+    conn.commit()
+    conn.close()
+
+    out = tmp_path / "d.html"
+    exit_code = main(
+        ["export", "--subject-id", "a@x.com", "--db", str(seeded_db), "--out", str(out)]
+    )
+    assert exit_code == 1
+    # The dossier is still written -- refusing would leave nothing to file.
+    assert "FAILED" in out.read_text()
+
+
+def test_cli_export_exits_1_and_creates_nothing_at_a_missing_db(tmp_path, capsys):
+    missing = tmp_path / "nope.db"
+    out = tmp_path / "d.html"
+    exit_code = main(
+        ["export", "--subject-id", "a@x.com", "--db", str(missing), "--out", str(out)]
+    )
+    assert exit_code == 1
+    assert not missing.exists()
+    assert not out.exists()
+    assert "no lineage database" in capsys.readouterr().err.lower()
+
+
+def test_cli_export_reports_a_missing_pdf_extra(seeded_db, tmp_path, capsys, monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("reportlab"):
+            raise ImportError("No module named 'reportlab'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    exit_code = main(
+        [
+            "export", "--subject-id", "a@x.com", "--db", str(seeded_db),
+            "--format", "pdf", "--out", str(tmp_path / "d.pdf"),
+        ]
+    )
+    assert exit_code == 2
+    assert "pip install consentml[pdf]" in capsys.readouterr().err
+
+
+def test_cli_export_unopenable_db_exits_two(tmp_path, capsys):
+    # A directory at the db path can't be opened by sqlite3 at all -- the
+    # same "couldn't read it" case verify and migrate distinguish from
+    # "no database at this path" (exit 1). See their equivalent tests above.
+    unopenable = tmp_path / "not-a-db.db"
+    unopenable.mkdir()
+    exit_code = main(
+        ["export", "--subject-id", "a@x.com", "--db", str(unopenable)]
+    )
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "Error: could not open database" in err
