@@ -175,6 +175,41 @@ def test_render_html_reports_a_missing_database(tmp_path):
     assert "No lineage database" in html
 
 
+def test_render_html_claims_nothing_about_models_when_no_database_was_read(tmp_path):
+    """Section 2 must not exculpate on the strength of an unread database.
+
+    An empty affected_models list means "none found" only if something was
+    searched. With no database there was no search, and "No models were
+    trained on this data subject's data. No remediation is required." is then
+    a false statement in the one document that leaves the building.
+    """
+    html = render_html(build_dossier(subject_id="a@x.com", db_path=tmp_path / "no.db"))
+    assert "No models were trained" not in html
+    assert "No remediation is required" not in html
+    assert "could not be determined whether any models were trained" in html
+
+
+def test_render_html_claims_nothing_about_processing_when_no_database_was_read(
+    tmp_path,
+):
+    """Section 3, same reasoning: no read, so no basis for either answer."""
+    html = render_html(build_dossier(subject_id="a@x.com", db_path=tmp_path / "no.db"))
+    assert "No revocation event has been recorded" not in html
+    assert "has not yet been processed" not in html
+    assert "could not be determined whether this request has been processed" in html
+
+
+def test_render_html_caveats_that_the_chain_cannot_see_a_full_rewrite(dossier):
+    """"VERIFIED" without this caveat overpromises.
+
+    verify.py's docstring and the README both carry it; the dossier is the
+    copy a third party reads, so it is the one place it cannot be left out.
+    """
+    html = render_html(dossier)
+    assert "rewrites the whole log from genesis" in html
+    assert "--expected-head" in html
+
+
 def test_render_html_dumps_provenance_that_has_no_label(tmp_path):
     """PostgresSource provenance has no 'label' key.
 
@@ -321,6 +356,85 @@ def test_render_pdf_handles_unreadable_provenance(tmp_path):
 
     data = render_pdf(build_dossier(subject_id="a@x.com", db_path=db))
     assert data.startswith(b"%PDF")
+
+
+def _pdf_paragraphs(dossier) -> str:
+    """Every paragraph the PDF would contain, as one string.
+
+    reportlab compresses its text streams, so the rendered bytes cannot be
+    searched for a phrase; asserting `startswith(b"%PDF")` is all an
+    output-only test can do, and that is how the PDF drifted away from the
+    HTML. _pdf_story() exposes the flowables before they are laid out, so a
+    test can read what the document actually says. Table contents are checked
+    separately via _pdf_model_rows().
+    """
+    from consentml.render import _pdf_story
+
+    return "\n".join(
+        f.text for f in _pdf_story(dossier) if getattr(f, "text", None) is not None
+    )
+
+
+def test_render_pdf_claims_nothing_about_models_or_processing_without_a_database(
+    tmp_path,
+):
+    """Sections 2 and 3 of the PDF, matching the HTML assertions above."""
+    dossier = build_dossier(subject_id="a@x.com", db_path=tmp_path / "no.db")
+    text = _pdf_paragraphs(dossier)
+    assert "No models were trained" not in text
+    assert "No remediation is required" not in text
+    assert "No revocation event has been recorded" not in text
+    assert "could not be determined whether any models were trained" in text
+    assert "could not be determined whether this request has been processed" in text
+
+
+def test_render_pdf_caveats_that_the_chain_cannot_see_a_full_rewrite(dossier):
+    text = _pdf_paragraphs(dossier)
+    assert "rewrites the whole log from genesis" in text
+    assert "--expected-head" in text
+
+
+def test_render_pdf_table_carries_the_model_hash_column(dossier):
+    """The PDF and the HTML must state the same per-model facts.
+
+    The model hash is what ties a recommendation to a specific deployed
+    artifact, so a PDF without it is a weaker document than the HTML built
+    from the same dossier. Asserted against the table's own cell text rather
+    than the rendered bytes -- see _pdf_paragraphs above.
+    """
+    from consentml.render import _pdf_model_rows
+
+    header, *rows = _pdf_model_rows(dossier)
+    assert header == [
+        "Model",
+        "Training data",
+        "Trained at",
+        "Model hash",
+        "Recommendation",
+    ]
+    assert len(rows) == 1
+    assert rows[0][header.index("Model hash")] == "beef"
+    assert rows[0][header.index("Model")] == "churn_v3"
+    # The same fact, from the same dossier, in the other renderer.
+    assert "beef" in render_html(dossier)
+
+
+def test_render_pdf_model_table_fits_between_the_margins(dossier):
+    """The added column must not push the table off the page.
+
+    SimpleDocTemplate is built with 0.9in margins on LETTER, leaving 6.7in.
+    reportlab silently overflows a too-wide table rather than raising, so
+    nothing else would catch this.
+    """
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Table
+
+    from consentml.render import _pdf_story
+
+    tables = [f for f in _pdf_story(dossier) if isinstance(f, Table)]
+    assert len(tables) == 1
+    assert sum(tables[0]._argW) <= LETTER[0] - 1.8 * inch
 
 
 def test_render_pdf_dumps_provenance_that_has_no_label(tmp_path):

@@ -39,6 +39,37 @@ footer { margin-top: 3rem; color: #666; font-size: 0.8rem; }
 """
 
 
+# Sections 2 and 3 report the absence of something -- no models, no recorded
+# revocation. Absence is only a finding if a database was actually read. When
+# none was, these say so instead: an erasure-response document that asserts
+# "no models were trained on this person's data" without having read anything
+# is the false clean the whole feature is built to avoid, and the dossier is
+# the artifact that leaves the building. Shared constants rather than one
+# string per renderer, so HTML and PDF cannot drift apart on the point.
+_NO_DB_MODELS = (
+    "No lineage database was read, so it could not be determined whether any "
+    "models were trained on this data subject's data. This is not a finding "
+    "that there were none."
+)
+_NO_DB_EVENTS = (
+    "No lineage database was read, so it could not be determined whether this "
+    "request has been processed. This is not a finding that no revocation was "
+    "recorded."
+)
+
+# Stated next to the head hash in both renderers. verify.py's docstring and
+# the README's anchoring section both carry this caveat; the dossier is the
+# copy a third party reads, so omitting it here is where it matters most.
+_HEAD_CAVEAT = (
+    "Record this head hash outside the database. A hash chain alone cannot "
+    "detect an attacker who rewrites the whole log from genesis and "
+    "recomputes every hash, so "
+    '"intact" means intact relative to this database as it stands. Comparing '
+    "this head hash against one anchored earlier, elsewhere, is what detects "
+    "a rewrite -- see consentml verify --expected-head."
+)
+
+
 def render_json(dossier) -> str:
     """The dossier as indented JSON."""
     return json.dumps(dossier.to_dict(), indent=2, sort_keys=True)
@@ -96,6 +127,8 @@ def _verdict_block(dossier) -> str:
 
 
 def _models_section(dossier) -> str:
+    if not dossier.database_found:
+        return f'<div class="caveat">{_NO_DB_MODELS}</div>'
     if not dossier.affected_models:
         return (
             "<p>No models were trained on this data subject's data. No "
@@ -119,6 +152,8 @@ def _models_section(dossier) -> str:
 
 
 def _events_section(dossier) -> str:
+    if not dossier.database_found:
+        return f'<div class="caveat">{_NO_DB_EVENTS}</div>'
     if not dossier.revocation_events:
         return (
             "<p>No revocation event has been recorded for this subject. The "
@@ -165,9 +200,8 @@ def render_html(dossier) -> str:
 <h2>1. Audit log integrity</h2>
 {_verdict_block(dossier)}
 <p class="mono">Head hash: {_e(dossier.head_hash)}</p>
-<p>Record this head hash outside the database. It lets any third party
-re-verify this log later, independently of the organization that produced
-this document.</p>
+<p>{_HEAD_CAVEAT} It also lets any third party re-verify this log later,
+independently of the organization that produced this document.</p>
 {_caveats(dossier)}
 
 <h2>2. Models trained on this subject's data</h2>
@@ -199,46 +233,52 @@ def _plain_provenance(provenance) -> str:
     return json.dumps(provenance, sort_keys=True)
 
 
-def render_pdf(dossier) -> bytes:
-    """The dossier as a PDF. Requires the optional [pdf] extra.
+def _pdf_model_rows(dossier) -> list:
+    """The models table as plain cell text: header row, then one row per model.
 
-    reportlab is imported here rather than at module scope so that importing
-    consentml -- or rendering HTML -- never requires the extra. The
-    ImportError is translated into a ConsentMLError naming the exact install
-    command, because a raw traceback mentioning 'reportlab' does not tell an
-    operator what to do about it.
+    Split out of render_pdf so a test can assert what the table actually says
+    without parsing a PDF. It was tests asserting only that the bytes start
+    with %PDF that let the PDF drop the Model hash column the HTML has --
+    two renderings of one dossier stating different per-model facts, with the
+    hash that ties a recommendation to a specific deployed artifact missing
+    from the copy that gets filed.
     """
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import LETTER
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.lib.units import inch
-        from reportlab.platypus import (
-            Paragraph,
-            SimpleDocTemplate,
-            Spacer,
-            Table,
-            TableStyle,
-        )
-    except ImportError as exc:
-        raise ConsentMLError(
-            "PDF output needs the optional 'pdf' extra: "
-            "pip install consentml[pdf]"
-        ) from exc
+    rows = [["Model", "Training data", "Trained at", "Model hash", "Recommendation"]]
+    rows += [
+        [
+            str(m.model_name),
+            _plain_provenance(m.provenance),
+            str(m.started_at),
+            str(m.model_hash),
+            str(m.recommendation),
+        ]
+        for m in dossier.affected_models
+    ]
+    return rows
 
-    import io
+
+def _pdf_story(dossier) -> list:
+    """Everything the PDF says, as reportlab flowables.
+
+    Separate from render_pdf so a test can read the document's own words:
+    reportlab compresses its text streams, so an assertion against the
+    output bytes can only confirm that *a* PDF was produced. Tests that could
+    say no more than that are how this renderer came to omit a column the
+    HTML includes and to assert things about a database it never read.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
 
     styles = getSampleStyleSheet()
     body = styles["BodyText"]
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=LETTER,
-        title=f"Consent revocation dossier - {dossier.subject_id}",
-        leftMargin=0.9 * inch,
-        rightMargin=0.9 * inch,
+    # wordWrap="CJK" breaks between any two characters. A model hash is one
+    # 64-character token with nothing to wrap on, so the default word wrap
+    # would run it out of its column and off the page.
+    hash_cell = ParagraphStyle(
+        "ModelHash", parent=body, fontName="Courier", fontSize=7, wordWrap="CJK"
     )
-
     story = [
         Paragraph("Consent revocation dossier", styles["Title"]),
         Paragraph(
@@ -280,6 +320,7 @@ def render_pdf(dossier) -> bytes:
             story.append(Paragraph(f"- {_e(f.code)}: {_e(f.detail)}", body))
 
     story.append(Paragraph(f"Head hash: {_e(dossier.head_hash)}", body))
+    story.append(Paragraph(_HEAD_CAVEAT, body))
     if dossier.n_legacy_runs:
         story.append(
             Paragraph(
@@ -294,7 +335,9 @@ def render_pdf(dossier) -> bytes:
         Spacer(1, 0.2 * inch),
         Paragraph("2. Models trained on this subject's data", styles["Heading2"]),
     ]
-    if not dossier.affected_models:
+    if not dossier.database_found:
+        story.append(Paragraph(_NO_DB_MODELS, body))
+    elif not dossier.affected_models:
         story.append(
             Paragraph(
                 "No models were trained on this data subject's data. No "
@@ -303,17 +346,23 @@ def render_pdf(dossier) -> bytes:
             )
         )
     else:
-        rows = [["Model", "Training data", "Trained at", "Recommendation"]]
+        header, *model_rows = _pdf_model_rows(dossier)
+        rows = [[Paragraph(_e(cell), body) for cell in header]]
         rows += [
             [
-                Paragraph(_e(m.model_name), body),
-                Paragraph(_e(_plain_provenance(m.provenance)), body),
-                Paragraph(_e(m.started_at), body),
-                Paragraph(_e(m.recommendation), body),
+                Paragraph(_e(name), body),
+                Paragraph(_e(provenance), body),
+                Paragraph(_e(started_at), body),
+                Paragraph(_e(model_hash), hash_cell),
+                Paragraph(_e(recommendation), body),
             ]
-            for m in dossier.affected_models
+            for name, provenance, started_at, model_hash, recommendation in model_rows
         ]
-        table = Table(rows, colWidths=[1.5 * inch, 2.2 * inch, 1.6 * inch, 1.4 * inch])
+        # Sums to 6.7in, the printable width between the margins set above.
+        table = Table(
+            rows,
+            colWidths=[1.2 * inch, 1.7 * inch, 1.25 * inch, 1.15 * inch, 1.4 * inch],
+        )
         table.setStyle(
             TableStyle(
                 [
@@ -330,7 +379,9 @@ def render_pdf(dossier) -> bytes:
         Spacer(1, 0.2 * inch),
         Paragraph("3. Recorded processing of this request", styles["Heading2"]),
     ]
-    if not dossier.revocation_events:
+    if not dossier.database_found:
+        story.append(Paragraph(_NO_DB_EVENTS, body))
+    elif not dossier.revocation_events:
         story.append(
             Paragraph(
                 "No revocation event has been recorded for this subject.", body
@@ -358,5 +409,38 @@ def render_pdf(dossier) -> bytes:
         ),
     ]
 
-    doc.build(story)
+    return story
+
+
+def render_pdf(dossier) -> bytes:
+    """The dossier as a PDF. Requires the optional [pdf] extra.
+
+    reportlab is imported here rather than at module scope so that importing
+    consentml -- or rendering HTML -- never requires the extra. The
+    ImportError is translated into a ConsentMLError naming the exact install
+    command, because a raw traceback mentioning 'reportlab' does not tell an
+    operator what to do about it. This function is the only entry point, so
+    catching it here also covers the imports inside _pdf_story().
+    """
+    try:
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate
+    except ImportError as exc:
+        raise ConsentMLError(
+            "PDF output needs the optional 'pdf' extra: "
+            "pip install consentml[pdf]"
+        ) from exc
+
+    import io
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=LETTER,
+        title=f"Consent revocation dossier - {dossier.subject_id}",
+        leftMargin=0.9 * inch,
+        rightMargin=0.9 * inch,
+    )
+    doc.build(_pdf_story(dossier))
     return buffer.getvalue()
