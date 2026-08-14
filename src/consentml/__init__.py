@@ -13,7 +13,7 @@ from consentml.verify import (
     verify_audit_log,
 )
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 __all__ = [
     "track",

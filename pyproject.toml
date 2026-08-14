@@ -4,12 +4,32 @@ build-backend = "hatchling.build"
 
 [project]
 name = "consentml"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Data-lineage tracking and consent-revocation reporting for ML pipelines"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
+authors = [{ name = "Lokesh Karanam", email = "sunnylokesh3@gmail.com" }]
+keywords = ["data-lineage", "consent", "gdpr", "machine-learning", "provenance", "audit"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = ["pandas>=2.0"]
+
+[project.urls]
+Homepage = "https://consentml.lokeshkaranam.me/"
+Documentation = "https://consentml.lokeshkaranam.me/"
+Repository = "https://github.com/KaranamLokesh/consentml"
+Issues = "https://github.com/KaranamLokesh/consentml/issues"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
@@ -37,6 +57,18 @@ consentml = "consentml.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/consentml"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/consentml",
+    "tests",
+    "examples",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 addopts = "-q"
