@@ -7,9 +7,15 @@ you can run yourself, in order, in an empty directory.
 
 ## Install
 
+ConsentML is pre-release: v0 is still in development and there is no PyPI
+release yet, so install from source instead:
+
 ```bash
-pip install consentml
+pip install git+https://github.com/KaranamLokesh/consentml.git
 ```
+
+Once a version is published, `pip install consentml` will work directly.
+Requires Python 3.10 or later.
 
 Data sources and export formats beyond the basics are behind optional
 extras — `consentml[postgres]` and `consentml[pdf]` — introduced as they come
@@ -77,6 +83,12 @@ Dry run: nothing recorded.
 
 `readmission-risk` is flagged `retrain` because patient `p2`'s data is in
 this run and no later run supersedes it.
+
+Double-check `--db` before you rely on a `0 affected models` result: if the
+path is wrong, `revoke` doesn't error — it creates an empty database at that
+path and reports `0 affected models` against it, `--dry-run` included. See
+[the CLI reference](../reference/cli.md#revoke) for what that means in
+practice.
 
 ## Produce a dossier
 
