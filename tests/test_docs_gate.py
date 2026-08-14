@@ -104,3 +104,49 @@ def test_inflected_forms_still_trigger(tmp_path, word):
     (tmp_path / "page.md").write_text(f"# Why\n\nThis mentions {word} directly.\n")
     result = _run(tmp_path)
     assert result.returncode == 1
+
+
+def test_filename_containing_term_is_caught(tmp_path):
+    """A file's name becomes its published URL slug, so a term in the
+    filename must fail the gate even when the file's content is clean."""
+    (tmp_path / "eb1-rationale.md").write_text("# ConsentML\n\nClean content.\n")
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    assert "eb1" in (result.stdout + result.stderr).lower()
+
+
+def test_default_mode_scans_git_tracked_files(tmp_path):
+    """With no arguments, the scan set comes from `git ls-files` -- every
+    tracked file -- not a hardcoded path list, so a tracked file anywhere
+    in the repo is covered even if it's outside the historical four paths."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "random-notes.md").write_text("This describes a petition process.\n")
+    subprocess.run(["git", "add", "random-notes.md"], cwd=tmp_path, check=True)
+
+    result = subprocess.run(
+        [str(SCRIPT)], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert result.returncode == 1
+    assert "petition" in (result.stdout + result.stderr).lower()
+
+
+def test_default_mode_ignores_untracked_files(tmp_path):
+    """An untracked file is not part of what ships, so `git ls-files` --
+    and therefore the default scan -- must not pick it up."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.md").write_text("# ConsentML\n\nClean content.\n")
+    subprocess.run(["git", "add", "tracked.md"], cwd=tmp_path, check=True)
+    (tmp_path / "untracked-petition-notes.md").write_text("Also a petition.\n")
+
+    result = subprocess.run(
+        [str(SCRIPT)], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
