@@ -41,7 +41,7 @@ promised deletion would be promising something it cannot deliver.
 
 | Standard | What ConsentML supports |
 |---|---|
-| NIST AI RMF | GOVERN-1.4 (documentation), MAP-2.3 (system operation), MANAGE-2.3 (response plans) |
+| NIST AI RMF | Govern (documented, transparent risk-management processes), Map (documented data provenance), MANAGE-2.3 (response plans) |
 | GDPR | Article 30 records of processing; Article 17 erasure requests |
 | CCPA/CPRA | Audit-trail expectations for consumer requests |
 
