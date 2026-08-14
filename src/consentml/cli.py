@@ -2,6 +2,7 @@
 
     consentml revoke --subject-id <id>
     consentml verify [--expected-head <hash>]
+    consentml export --subject-id <id> [--format html|json|pdf] [--out PATH]
 
 Exit codes: 0 clean, 1 the database was read and problems were found
 (including no database at the given path), 2 the database could not be read.
@@ -11,8 +12,12 @@ import argparse
 import json
 import sqlite3
 import sys
+from pathlib import Path
 
+from consentml.errors import ConsentMLError
+from consentml.export import build_dossier
 from consentml.migrate import migrate_database
+from consentml.render import render_html, render_json, render_pdf
 from consentml.revoke import revoke
 from consentml.verify import verify_audit_log
 
@@ -99,6 +104,64 @@ def _print_migrate_summary(result):
     print(f"Original kept at {result.backup_path}")
 
 
+def _run_export(args) -> int:
+    """Build and write the dossier. Returns the process exit code.
+
+    The dossier is written even when verification fails: export is read-only,
+    so refusing protects nothing and would leave an operator facing a
+    statutory deadline with nothing to file. A document whose first section
+    reads "FAILED verification" is more useful than no document -- the
+    nonzero exit is what stops that passing silently in a pipeline.
+    """
+    if args.fmt == "pdf" and args.out == "-":
+        print(
+            "Error: PDF output is binary; pass --out with a file path.",
+            file=sys.stderr,
+        )
+        return 2
+
+    dossier = build_dossier(subject_id=args.subject_id, db_path=args.db)
+
+    if not dossier.database_found:
+        for f in dossier.verification.findings:
+            print(f"Error: {f.detail}", file=sys.stderr)
+        return 1
+
+    try:
+        if args.fmt == "json":
+            payload = render_json(dossier)
+        elif args.fmt == "pdf":
+            payload = render_pdf(dossier)
+        else:
+            payload = render_html(dossier)
+    except ConsentMLError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+    if args.out == "-":
+        print(payload)
+    else:
+        out = (
+            Path(args.out)
+            if args.out
+            else Path(f"consentml-dossier-{dossier.subject_key[:12]}.{args.fmt}")
+        )
+        if isinstance(payload, bytes):
+            out.write_bytes(payload)
+        else:
+            # Explicit, not the platform default: render_html() emits U+2014
+            # and declares <meta charset="utf-8">, so on a non-UTF-8 locale
+            # the bytes would contradict the declaration, and a non-ASCII
+            # model name would raise UnicodeEncodeError instead of writing.
+            out.write_text(payload, encoding="utf-8")
+        # Absolute, not just `out`: a relative default filename printed
+        # relative to the cwd is easy to lose track of once an operator
+        # pipes this into a ticket or a shell script that changes directory.
+        print(f"Wrote {out.resolve()}")
+
+    return 0 if dossier.verification.ok else 1
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="consentml",
@@ -152,7 +215,40 @@ def main(argv=None) -> int:
         "--json", dest="as_json", action="store_true", help="Emit JSON"
     )
 
+    p_export = sub.add_parser(
+        "export", help="Export a per-subject dossier for a revocation request"
+    )
+    p_export.add_argument("--subject-id", required=True)
+    p_export.add_argument(
+        "--db", default=None, help="Lineage DB path (default: ~/.consentml/lineage.db)"
+    )
+    p_export.add_argument(
+        "--format",
+        dest="fmt",
+        default="html",
+        choices=["html", "json", "pdf"],
+        help="Output format (default: html)",
+    )
+    p_export.add_argument(
+        "--out",
+        default=None,
+        help=(
+            "Output path; '-' writes to stdout (html/json only). Default: "
+            "consentml-dossier-<subject-key-prefix>.<ext> in the working directory"
+        ),
+    )
+
     args = parser.parse_args(argv)
+
+    if args.command == "export":
+        try:
+            return _run_export(args)
+        except (sqlite3.Error, OSError) as e:
+            print(
+                f"Error: could not open database at {args.db!r}: {e}",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         if args.command == "verify":
