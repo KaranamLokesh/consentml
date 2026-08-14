@@ -1,0 +1,44 @@
+name: Deploy docs to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Only one deploy at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same guard the GitHub Pages workflow uses: a forbidden term must never
+      # reach the served site, even a build we would otherwise throw away.
+      - name: Check for forbidden terms in published docs
+        run: ./scripts/check-docs-terms.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[docs]"
+
+      - name: Build
+        run: mkdocs build --strict
+
+      - name: Deploy site/ to EC2 over rsync
+        uses: burnett01/rsync-deployments@7.0.2
+        with:
+          # -a archive, -z compress, --delete mirror (removes stale files)
+          switches: -avzr --delete
+          path: site/
+          remote_path: /var/www/consentml/
+          remote_host: ${{ secrets.EC2_HOST }}
+          remote_user: ${{ secrets.EC2_USER }}
+          remote_key: ${{ secrets.EC2_SSH_KEY }}

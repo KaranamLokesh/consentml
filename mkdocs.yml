@@ -2,7 +2,7 @@ site_name: ConsentML
 site_description: >-
   Data-lineage tracking and consent-revocation reporting for production ML
   pipelines.
-site_url: https://karanamlokesh.github.io/consentml/
+site_url: https://consentml.lokeshkaranam.me/
 repo_url: https://github.com/KaranamLokesh/consentml
 repo_name: KaranamLokesh/consentml
 edit_uri: edit/main/docs-site/
