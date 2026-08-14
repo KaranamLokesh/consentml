@@ -65,9 +65,9 @@ nav:
       - Anchoring the head hash: guides/anchoring.md
       - Using exit codes in CI: guides/ci.md
   - Reference:
-      - CLI: reference/cli.md
+      - CLI reference: reference/cli.md
       - Python API: reference/api.md
       - Schema: reference/schema.md
   - Why ConsentML:
-      - Why: why/index.md
+      - Why ConsentML: why/index.md
       - Threat model: why/threat-model.md
