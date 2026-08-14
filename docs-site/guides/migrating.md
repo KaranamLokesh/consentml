@@ -36,13 +36,21 @@ would produce a fresh, internally consistent one, which launders the
 tampering and destroys the evidence.
 
 The new database is built at a separate path alongside the original,
-verified in turn, and only swapped into place — via two atomic renames —
-once that second verification is clean. A failure at any point leaves the
-original untouched; there's no rollback logic that could itself get the
-recovery wrong. The original is kept as `<name>.pre-migration.bak` once the
-swap succeeds — delete it once you're satisfied with the result. Because the
-new database is built before the original is touched, migration needs
-enough free disk for two copies of the database while it runs.
+verified in turn, and only swapped into place once that second verification
+is clean. A failure before the swap starts — either verification failing,
+or the staging database failing to build — leaves the original completely
+untouched. The swap itself is two renames: the original to
+`<name>.pre-migration.bak`, then the staging database to the original's
+path. If the first rename succeeds but the second fails, migration tries to
+put the original back automatically; that recovery is itself a rename and
+can fail too. When it does, the original is left sitting at
+`<name>.pre-migration.bak` with nothing at the canonical path, and the error
+tells you to restore it manually — move the backup back to the original
+name — before retrying. Once the swap succeeds, the original is kept as
+`<name>.pre-migration.bak` — delete it once you're satisfied with the
+result. Because the new database is built before the original is touched,
+migration needs enough free disk for two copies of the database while it
+runs.
 
 ## Why the database may grow
 
