@@ -3,12 +3,12 @@
 ## The exit-code contract
 
 `verify`, `migrate` and `export` share one exit-code contract: 0 means
-clean, 1 means the database was read and something was found — a
-verification finding, a missing database, a migration that was refused —
-and 2 means the database could not be read at all, or the requested output
-could not be produced. `revoke` is the exception: it always reports what it
-found and exits 0, whether or not the subject affected any model, and only
-exits 2 if the database can't be read.
+clean, 1 means something was found — a verification finding, a missing
+database, a migration that was refused — and 2 means the database could not
+be read at all, or the requested output could not be produced. `revoke` is
+the exception: it always reports what it found and exits 0, whether or not
+the subject affected any model, and only exits 2 if the database can't be
+read.
 
 The distinction between 1 and 2 matters for how a pipeline should react. A
 missing database is exit 1 — the path was checked and there was nothing
@@ -40,9 +40,13 @@ Error: could not open database at 'some-directory': disk I/O error
 ```yaml
 - name: Verify the lineage audit log
   run: |
-    pip install consentml
+    pip install git+https://github.com/KaranamLokesh/consentml.git
     consentml verify --db lineage.db --expected-head "${{ secrets.CONSENTML_ANCHOR }}"
 ```
+
+ConsentML is pre-release and has no PyPI release yet, so CI needs to install
+from source as above; swap in `pip install consentml` once a version is
+published.
 
 A nonzero exit from this step fails the job, the same way any other `run:`
 step would. See [the anchoring guide](anchoring.md) for what
