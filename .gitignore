@@ -11,3 +11,6 @@ dist/
 
 # Wheels built outside dist/ (e.g. for the Colab demo upload)
 *.whl
+
+# mkdocs build output
+site/

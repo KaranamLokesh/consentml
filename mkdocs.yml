@@ -1,0 +1,73 @@
+site_name: ConsentML
+site_description: >-
+  Data-lineage tracking and consent-revocation reporting for production ML
+  pipelines.
+site_url: https://karanamlokesh.github.io/consentml/
+repo_url: https://github.com/KaranamLokesh/consentml
+repo_name: KaranamLokesh/consentml
+edit_uri: edit/main/docs-site/
+
+# docs-site/, not docs/: docs/ holds internal specs and plans that must not
+# be published.
+docs_dir: docs-site
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            show_root_heading: true
+            heading_level: 3
+            docstring_style: google
+            members_order: source
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Quickstart: getting-started/quickstart.md
+      - Tracking a run: getting-started/tracking.md
+      - Your first dossier: getting-started/first-dossier.md
+  - Guides:
+      - Postgres: guides/postgres.md
+      - Migrating a database: guides/migrating.md
+      - Anchoring the head hash: guides/anchoring.md
+      - Using exit codes in CI: guides/ci.md
+  - Reference:
+      - CLI: reference/cli.md
+      - Python API: reference/api.md
+      - Schema: reference/schema.md
+  - Why ConsentML:
+      - Why: why/index.md
+      - Threat model: why/threat-model.md
