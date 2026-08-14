@@ -28,6 +28,15 @@ consentml revoke --subject-id p2 --db lineage.db --dry-run
 Dry run: nothing recorded.
 ```
 
+`revoke` provisions a database at `--db` if nothing exists there yet, the
+same way `@track` does on first use — `--dry-run` doesn't change this, it
+only skips the audit-log write. A mistyped path is not reported as an
+error: it silently creates an empty database, then reports `0 affected
+models` against it, with a normal exit code. Confirm the path points at the
+database you actually mean to query before trusting a `0 affected models`
+result — `verify` against the same path would report `missing_database`
+instead.
+
 ## verify
 
 Checks the audit log independently of any one subject: that every entry
@@ -98,11 +107,19 @@ Wrote /path/to/your/directory/consentml-dossier-3946ca64ff78.html
 | Code | Meaning |
 | --- | --- |
 | 0 | Clean: no problems found. |
-| 1 | Problems were found. For `verify` and `migrate`, that's a verification finding, a missing database, or a migration refused. For `export`, a dossier is still written and reports the problem in its own verification section — unless there was no lineage database at the given path, in which case nothing is written at all. `revoke` never exits 1: it always reports what it found, whether or not the subject affected any model. |
-| 2 | The database could not be read at all — a bad path, a permission error, a file that isn't a SQLite database — or `--format pdf` was used without the `consentml[pdf]` extra installed. |
+| 1 | Problems were found. For `verify` and `migrate`, that's a verification finding, a missing database, a migration refused, or a file that opens fine as SQLite but isn't a ConsentML lineage database — a 0-byte file or a foreign SQLite database report `not_a_lineage_database` the same way. For `export`, a dossier is still written and reports the problem in its own verification section — unless there was no lineage database at the given path, in which case nothing is written at all. `revoke` never exits 1: it always reports what it found, whether or not the subject affected any model. |
+| 2 | The database could not be read at all — a bad path, a permission error, bytes that genuinely aren't a SQLite database — or `--format pdf` was used without the `consentml[pdf]` extra installed. |
 
 The missing-database case is exit 1, not 2, but it isn't "the database was
 read and problems were found" either: `verify` checks whether the path
 exists before it ever opens anything, and reports `missing_database` without
 reading a byte. `export` shares that same check, which is why it's the one
 case where exit 1 produces no dossier — there's nothing built yet to write.
+
+A file that exists and opens as SQLite, but isn't one of ours — an empty
+file, or a database from something else entirely — is also exit 1, reported
+as `not_a_lineage_database`. It's a distinct code from `missing_database` on
+purpose: the fixes differ (wrong path vs. wrong file), and someone debugging
+"missing database" against a file that plainly exists would look in the
+wrong place. Exit 2 is reserved for paths that can't be opened as SQLite at
+all.
