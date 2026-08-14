@@ -1,0 +1,62 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # First, before anything is built: a leaked term must never reach an
+      # artifact, even one that is thrown away.
+      - name: Check for forbidden terms in published docs
+        run: ./scripts/check-docs-terms.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[docs]"
+
+      - name: Build
+        run: mkdocs build --strict
+
+      - name: Upload the built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: site/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only from main, and only once the repository is public. While it is
+    # private this is a no-op; the first push after it goes public deploys,
+    # with no workflow edit needed at launch.
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.private == false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[docs]"
+
+      - name: Deploy to GitHub Pages
+        run: mkdocs gh-deploy --force
