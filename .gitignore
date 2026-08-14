@@ -11,3 +11,9 @@ dist/
 
 # Wheels built outside dist/ (e.g. for the Colab demo upload)
 *.whl
+
+# mkdocs build output
+site/
+
+# Internal specs and plans: working documents, not published with the repo.
+docs/superpowers/
