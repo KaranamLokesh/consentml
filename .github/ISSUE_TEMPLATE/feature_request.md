@@ -14,4 +14,4 @@ What you are trying to accomplish, not the solution you have in mind.
 
 Note: ConsentML reports lineage; it does not delete data or modify models.
 Requests to make it perform deletion are out of scope by design — see
-[Reporting, not deletion](https://karanamlokesh.github.io/consentml/why/).
+[Reporting, not deletion](https://consentml.lokeshkaranam.me/why/).

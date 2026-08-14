@@ -8,10 +8,10 @@ and produces a tamper-evident audit trail.
 ## Documentation
 
 This README covers the basics. The
-[full site](https://karanamlokesh.github.io/consentml/) has a
-[Quickstart](https://karanamlokesh.github.io/consentml/getting-started/quickstart/),
-the [CLI and API reference](https://karanamlokesh.github.io/consentml/reference/cli/),
-and [why ConsentML is scoped the way it is](https://karanamlokesh.github.io/consentml/why/).
+[full site](https://consentml.lokeshkaranam.me/) has a
+[Quickstart](https://consentml.lokeshkaranam.me/getting-started/quickstart/),
+the [CLI and API reference](https://consentml.lokeshkaranam.me/reference/cli/),
+and [why ConsentML is scoped the way it is](https://consentml.lokeshkaranam.me/why/).
 
 ## Tracking a training run
 
@@ -91,7 +91,7 @@ from `EXPLAIN`, so a table the planner optimizes away will not appear.
 The SHA-256 of the whole provenance record goes into the hash-chained audit
 log, so editing provenance in the database is detected as `provenance_modified`.
 
-More on tracking runs: <https://karanamlokesh.github.io/consentml/getting-started/tracking/>
+More on tracking runs: <https://consentml.lokeshkaranam.me/getting-started/tracking/>
 
 ## Verifying the audit trail
 
@@ -156,7 +156,7 @@ The dossier covers one subject. The audit log is a single global chain, so
 exporting all of it to answer one subject's request would disclose every other
 subject's activity.
 
-More on exporting dossiers: <https://karanamlokesh.github.io/consentml/getting-started/first-dossier/>
+More on exporting dossiers: <https://consentml.lokeshkaranam.me/getting-started/first-dossier/>
 
 ## Anchoring
 
@@ -175,7 +175,7 @@ verifies; only a rewrite or truncation of history reports `head_mismatch`.
 This proves history up to the anchor point. It says nothing about entries
 appended after it — re-anchor regularly to narrow that window.
 
-More on anchoring: <https://karanamlokesh.github.io/consentml/guides/anchoring/>
+More on anchoring: <https://consentml.lokeshkaranam.me/guides/anchoring/>
 
 ## Upgrading an existing database
 
@@ -205,6 +205,6 @@ invalidate every entry hash. Runs migrated this way keep legacy guarantees:
 their provenance is not hash-protected, and `consentml verify` reports how many
 such runs it did not check rather than implying it did.
 
-More on migrating: <https://karanamlokesh.github.io/consentml/guides/migrating/>
+More on migrating: <https://consentml.lokeshkaranam.me/guides/migrating/>
 
 Status: pre-release (v0 in development). MIT license.
