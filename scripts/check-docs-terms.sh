@@ -10,7 +10,10 @@
 #   skipped, so this works before CONTRIBUTING.md is added.
 set -uo pipefail
 
-TERMS='EB1|petition|USCIS|adjudicator|immigration|criterion'
+# Leading \b only, deliberately no trailing boundary: bare terms and their
+# inflections (petitions, petitioner) must match, but substrings inside an
+# unrelated word (repetition, competition) must not.
+TERMS='\b(EB1|petition|USCIS|adjudicator|immigration|criterion)'
 
 if [ "$#" -gt 0 ]; then
     CANDIDATES=("$@")

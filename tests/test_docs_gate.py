@@ -81,3 +81,26 @@ def test_directory_with_no_forbidden_terms_passes(tmp_path):
     (tmp_path / "b.md").write_text("# More docs\n\nStill fine.\n")
     result = _run(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_substring_matches_do_not_trigger(tmp_path):
+    """Regression test: 'repetition' and 'competition' contain 'petition'
+    but are ordinary English words, not petition framing. A gate that
+    forces someone to reword correct prose to appease it trains people to
+    route around it."""
+    (tmp_path / "page.md").write_text(
+        "Avoid repetition in the nav labels.\n"
+        "There is healthy competition among lineage tools.\n"
+    )
+    result = _run(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("word", ["petitions", "petitioner"])
+def test_inflected_forms_still_trigger(tmp_path, word):
+    """The leading-boundary-only fix must not narrow the gate into
+    uselessness: plurals and agent nouns built on the bare term still
+    match."""
+    (tmp_path / "page.md").write_text(f"# Why\n\nThis mentions {word} directly.\n")
+    result = _run(tmp_path)
+    assert result.returncode == 1
