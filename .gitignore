@@ -14,3 +14,6 @@ dist/
 
 # mkdocs build output
 site/
+
+# Internal specs and plans: working documents, not published with the repo.
+docs/superpowers/
