@@ -5,11 +5,20 @@ tamper-evident record of it. When a subject asks to be forgotten, it tells you
 which deployed models were trained on their data instead of leaving you to
 guess.
 
+## Status
+
+Pre-release: v0 is still in development, and there is no PyPI release yet.
+Requires Python 3.10 or later. MIT license.
+
 ## Install
 
+Until there's a PyPI release, install from source:
+
 ```bash
-pip install consentml
+pip install git+https://github.com/KaranamLokesh/consentml.git
 ```
+
+Once a version is published, `pip install consentml` will work directly.
 
 Optional extras add a Postgres data source (`consentml[postgres]`) and PDF
 dossier export (`consentml[pdf]`).
