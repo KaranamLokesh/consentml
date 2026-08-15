@@ -7,18 +7,14 @@ guess.
 
 ## Status
 
-Pre-release: v0 is still in development, and there is no PyPI release yet.
+Beta: v0.x is on PyPI and the API may still change before 1.0.
 Requires Python 3.10 or later. MIT license.
 
 ## Install
 
-Until there's a PyPI release, install from source:
-
 ```bash
-pip install git+https://github.com/KaranamLokesh/consentml.git
+pip install consentml
 ```
-
-Once a version is published, `pip install consentml` will work directly.
 
 Optional extras add a Postgres data source (`consentml[postgres]`) and PDF
 dossier export (`consentml[pdf]`).

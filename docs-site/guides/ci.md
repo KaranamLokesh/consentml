@@ -40,13 +40,9 @@ Error: could not open database at 'some-directory': disk I/O error
 ```yaml
 - name: Verify the lineage audit log
   run: |
-    pip install git+https://github.com/KaranamLokesh/consentml.git
+    pip install consentml
     consentml verify --db lineage.db --expected-head "${{ secrets.CONSENTML_ANCHOR }}"
 ```
-
-ConsentML is pre-release and has no PyPI release yet, so CI needs to install
-from source as above; swap in `pip install consentml` once a version is
-published.
 
 A nonzero exit from this step fails the job, the same way any other `run:`
 step would. See [the anchoring guide](anchoring.md) for what

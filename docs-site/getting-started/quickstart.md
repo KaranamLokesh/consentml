@@ -7,14 +7,10 @@ you can run yourself, in order, in an empty directory.
 
 ## Install
 
-ConsentML is pre-release: v0 is still in development and there is no PyPI
-release yet, so install from source instead:
-
 ```bash
-pip install git+https://github.com/KaranamLokesh/consentml.git
+pip install consentml
 ```
 
-Once a version is published, `pip install consentml` will work directly.
 Requires Python 3.10 or later.
 
 Data sources and export formats beyond the basics are behind optional
