@@ -1,6 +1,7 @@
 # ConsentML
 
 [![PyPI version](https://img.shields.io/pypi/v/consentml.svg)](https://pypi.org/project/consentml/)
+[![CI](https://github.com/KaranamLokesh/consentml/actions/workflows/ci.yml/badge.svg)](https://github.com/KaranamLokesh/consentml/actions/workflows/ci.yml)
 
 Data-lineage tracking and consent-revocation reporting for production ML
 pipelines. Add one decorator to your training function; when a user revokes
