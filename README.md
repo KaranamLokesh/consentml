@@ -1,5 +1,7 @@
 # ConsentML
 
+[![PyPI version](https://img.shields.io/pypi/v/consentml.svg)](https://pypi.org/project/consentml/)
+
 Data-lineage tracking and consent-revocation reporting for production ML
 pipelines. Add one decorator to your training function; when a user revokes
 consent, ConsentML tells you which deployed models were trained on their data
@@ -207,4 +209,4 @@ such runs it did not check rather than implying it did.
 
 More on migrating: <https://consentml.lokeshkaranam.me/guides/migrating/>
 
-Status: pre-release (v0 in development). MIT license.
+Status: beta (v0.x — the API may change before 1.0). MIT license.
