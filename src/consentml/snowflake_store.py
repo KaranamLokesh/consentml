@@ -104,7 +104,54 @@ class SnowflakeLineageStore(LineageStore):
     def record_training_run(self, *, model_name, model_hash, provenance,
                             subject_ids_hashed, subject_id_values,
                             started_at, finished_at) -> str:
-        raise NotImplementedError
+        run_id = str(uuid.uuid4())
+        text = provenance_text(provenance)
+        cur = self._conn.cursor()
+        try:
+            with cur:
+                cur.execute(
+                    "INSERT INTO training_runs (run_id, model_name, model_hash, "
+                    "provenance, subject_ids_hashed, n_subjects, started_at, "
+                    "finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, model_name, model_hash, text,
+                     int(subject_ids_hashed), len(subject_id_values),
+                     started_at, finished_at),
+                )
+                cur.executemany(
+                    "INSERT INTO subject_index (run_id, subject_key) VALUES (?, ?)",
+                    [(run_id, v) for v in subject_id_values],
+                )
+                self._append_audit_entry(
+                    cur,
+                    event_type="training_run",
+                    payload=json.dumps(
+                        {
+                            "run_id": run_id,
+                            "model_name": model_name,
+                            "model_hash": model_hash,
+                            "provenance_sha256": provenance_hash(text),
+                            "n_subjects": len(subject_id_values),
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return run_id
+
+    def _append_audit_entry(self, cur, *, event_type, payload):
+        cur.execute("SELECT entry_hash FROM audit_log ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        prev_hash = row[0] if row else GENESIS_HASH
+        timestamp = datetime.now(timezone.utc).isoformat()
+        entry_hash = compute_entry_hash(prev_hash, timestamp, event_type, payload)
+        cur.execute(
+            "INSERT INTO audit_log (timestamp, event_type, payload, prev_hash, "
+            "entry_hash) VALUES (?, ?, ?, ?, ?)",
+            (timestamp, event_type, payload, prev_hash, entry_hash),
+        )
 
     def runs_for_subject_value(self, subject_id_value) -> list[dict]:
         raise NotImplementedError
