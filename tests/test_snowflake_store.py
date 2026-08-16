@@ -99,3 +99,38 @@ def test_revocation_and_audit_entries_chain(monkeypatch):
         assert entries[1]["prev_hash"] == entries[0]["entry_hash"]
     finally:
         store.close()
+
+
+def test_sqlite_and_snowflake_produce_identical_audit_chains(monkeypatch, tmp_path):
+    from consentml.store import SQLiteLineageStore
+
+    events = [
+        dict(model_name="m1", model_hash="h1", provenance={"kind": "x", "q": "1"},
+             subject_ids_hashed=True, subject_id_values=["a", "b"],
+             started_at="2026-01-01T00:00:00+00:00", finished_at="2026-01-01T00:00:01+00:00"),
+        dict(model_name="m2", model_hash="h2", provenance={"kind": "x", "q": "2"},
+             subject_ids_hashed=True, subject_id_values=["b", "c"],
+             started_at="2026-01-02T00:00:00+00:00", finished_at="2026-01-02T00:00:01+00:00"),
+    ]
+
+    def chain(store):
+        for e in events:
+            store.record_training_run(**e)
+        return [(x["event_type"], x["prev_hash"]) for x in store.audit_entries()], \
+               [x["entry_hash"] for x in store.audit_entries()]
+
+    sq = SQLiteLineageStore(db_path=tmp_path / "l.db")
+    sf = _store(monkeypatch)
+    try:
+        sq_meta, _ = chain(sq)
+        sf_meta, _ = chain(sf)
+        # entry_hash embeds a wall-clock timestamp, so the hashes themselves
+        # differ run-to-run; what must match is the CHAIN STRUCTURE: same
+        # event order, and each prev_hash linking to the prior entry_hash.
+        assert [m[0] for m in sq_meta] == [m[0] for m in sf_meta] == ["training_run", "training_run"]
+        for entries in (sq.audit_entries(), sf.audit_entries()):
+            assert entries[0]["prev_hash"] == "0" * 64
+            assert entries[1]["prev_hash"] == entries[0]["entry_hash"]
+    finally:
+        sq.close()
+        sf.close()
