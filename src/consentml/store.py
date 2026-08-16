@@ -12,6 +12,7 @@ Schema version lives in PRAGMA user_version. Versions 0 and 1 predate the
 provenance column; they can be read but not written -- see consentml.migrate.
 """
 
+import abc
 import hashlib
 import json
 import os
@@ -149,7 +150,52 @@ def _lenient_text(raw):
         return raw
 
 
-class LineageStore:
+def compute_entry_hash(prev_hash, timestamp, event_type, payload) -> str:
+    """The audit-chain link formula, in one place so every backend hashes
+    identically. Changing this reshapes every chain -- do not touch without a
+    schema/version story."""
+    return hashlib.sha256(
+        (prev_hash + timestamp + event_type + payload).encode("utf-8")
+    ).hexdigest()
+
+
+class LineageStore(abc.ABC):
+    """The backend-independent lineage store contract. Callers (track, verify,
+    revoke, export) depend only on these methods; concrete backends
+    (SQLiteLineageStore, SnowflakeLineageStore) implement them."""
+
+    @abc.abstractmethod
+    def record_training_run(self, *, model_name, model_hash, provenance,
+                            subject_ids_hashed, subject_id_values,
+                            started_at, finished_at) -> str: ...
+
+    @abc.abstractmethod
+    def runs_for_subject_value(self, subject_id_value) -> list[dict]: ...
+
+    @abc.abstractmethod
+    def latest_run_for_model(self, model_name) -> dict | None: ...
+
+    @abc.abstractmethod
+    def run_by_id(self, run_id) -> dict | None: ...
+
+    @abc.abstractmethod
+    def subject_count_for_run(self, run_id) -> int: ...
+
+    @abc.abstractmethod
+    def all_run_ids(self) -> set: ...
+
+    @abc.abstractmethod
+    def record_revocation(self, *, subject_key, n_affected_runs,
+                          recommended_actions) -> int: ...
+
+    @abc.abstractmethod
+    def audit_entries(self) -> list[dict]: ...
+
+    @abc.abstractmethod
+    def close(self): ...
+
+
+class SQLiteLineageStore(LineageStore):
     def __init__(self, db_path=None):
         self.db_path = Path(db_path) if db_path is not None else default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -346,9 +392,7 @@ class LineageStore:
         ).fetchone()
         prev_hash = row[0] if row else GENESIS_HASH
         timestamp = datetime.now(timezone.utc).isoformat()
-        entry_hash = hashlib.sha256(
-            (prev_hash + timestamp + event_type + payload).encode("utf-8")
-        ).hexdigest()
+        entry_hash = compute_entry_hash(prev_hash, timestamp, event_type, payload)
         cursor = self._conn.execute(
             "INSERT INTO audit_log (timestamp, event_type, payload, prev_hash, entry_hash) "
             "VALUES (?, ?, ?, ?, ?)",
