@@ -101,6 +101,27 @@ def test_revocation_and_audit_entries_chain(monkeypatch):
         store.close()
 
 
+def test_record_revocation_returns_the_actual_audit_row_id(monkeypatch):
+    # Pins the load-bearing property behind the MAX(id) decision (see
+    # task-4-8-report.md): revoke.py stores this return value as
+    # AffectedModelsReport.audit_log_entry_id, which the CLI prints and
+    # test_revoke.py asserts for exact id-equality against the SQLite
+    # backend. A prior audit entry (the training run) is seeded first so the
+    # revocation's id (2) is distinct from "count of revocation rows" (1) --
+    # a scoped-count regression would return 1 here and fail this assertion.
+    store = _store(monkeypatch)
+    try:
+        store.record_training_run(
+            model_name="m", model_hash="h", provenance={"kind": "snowflake"},
+            subject_ids_hashed=True, subject_id_values=["a"],
+            started_at="2026-01-01T00:00:00+00:00", finished_at="2026-01-01T00:00:01+00:00")
+        returned_id = store.record_revocation(
+            subject_key="hashed-a", n_affected_runs=1, recommended_actions=["retrain"])
+        assert returned_id == store.audit_entries()[-1]["id"]
+    finally:
+        store.close()
+
+
 def test_sqlite_and_snowflake_produce_identical_audit_chains(monkeypatch, tmp_path):
     from consentml.store import SQLiteLineageStore
 
