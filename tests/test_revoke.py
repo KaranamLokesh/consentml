@@ -6,7 +6,7 @@ import pytest
 from consentml.errors import ConsentMLError
 from consentml.hashing import hash_subject_id
 from consentml.revoke import AffectedModelsReport, revoke
-from consentml.store import LineageStore
+from consentml.store import SQLiteLineageStore
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def db(tmp_path):
 
 
 def _seed_run(db, model_name, subjects, started_at, hashed=True):
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         values = [hash_subject_id(s) if hashed else s for s in subjects]
         return store.record_training_run(
@@ -54,7 +54,7 @@ def test_revoke_unknown_subject_still_records_event(db):
     report = revoke(subject_id="ghost@x.com", db_path=db)
     assert report.affected_models == []
     assert report.recommended_actions == []
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         entries = store.audit_entries()
         assert len(entries) == 1
@@ -75,7 +75,7 @@ def test_revoke_audit_payload_has_hash_not_raw_id(db):
     _seed_run(db, "m", ["a@x.com"], "2026-07-01T00:00:00+00:00")
     report = revoke(subject_id="a@x.com", db_path=db)
     assert report.subject_key == hash_subject_id("a@x.com")
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         payload = store.audit_entries()[-1]["payload"]
     finally:
@@ -88,7 +88,7 @@ def test_revoke_dry_run_writes_nothing(db):
     _seed_run(db, "m", ["a@x.com"], "2026-07-01T00:00:00+00:00")
     report = revoke(subject_id="a@x.com", db_path=db, dry_run=True)
     assert report.audit_log_entry_id is None
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         assert all(e["event_type"] != "revocation" for e in store.audit_entries())
     finally:

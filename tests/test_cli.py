@@ -6,13 +6,13 @@ import pytest
 
 from consentml.cli import main
 from consentml.hashing import hash_subject_id
-from consentml.store import LineageStore
+from consentml.store import SQLiteLineageStore
 
 
 @pytest.fixture
 def seeded_db(tmp_path):
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",
@@ -50,7 +50,7 @@ def test_cli_revoke_human_output(seeded_db, capsys):
 
 def test_cli_dry_run_does_not_record(seeded_db, capsys):
     main(["revoke", "--subject-id", "a@x.com", "--db", str(seeded_db), "--dry-run"])
-    store = LineageStore(db_path=seeded_db)
+    store = SQLiteLineageStore(db_path=seeded_db)
     try:
         assert all(
             e["event_type"] != "revocation" for e in store.audit_entries()
@@ -156,7 +156,7 @@ def test_cli_verify_permission_denied_db_exits_two(tmp_path, capsys):
     # actually is a lineage database, so it must not be reported as if it
     # weren't.
     unreadable = tmp_path / "lineage.db"
-    LineageStore(db_path=unreadable).close()
+    SQLiteLineageStore(db_path=unreadable).close()
     os.chmod(unreadable, 0o000)
     try:
         exit_code = main(["verify", "--db", str(unreadable)])

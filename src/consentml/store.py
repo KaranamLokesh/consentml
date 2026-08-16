@@ -399,3 +399,19 @@ class SQLiteLineageStore(LineageStore):
             (timestamp, event_type, payload, prev_hash, entry_hash),
         )
         return cursor.lastrowid
+
+
+def open_store(target=None, *, db_path=None, **kwargs) -> "LineageStore":
+    """Return a LineageStore for `target`.
+
+    SQLite is the default and the only backend this factory builds today:
+    a None/omitted target, or an explicit db_path, yields SQLiteLineageStore.
+    The Snowflake branch (a 'snowflake://' target or a connection dict) is
+    added in the Snowflake store task; until then this stays SQLite-only so
+    the CLI and every existing caller behave exactly as before.
+    """
+    if db_path is not None and target is None:
+        return SQLiteLineageStore(db_path=db_path)
+    if target is None or isinstance(target, (str, __import__("pathlib").Path)):
+        return SQLiteLineageStore(db_path=target if target is not None else db_path)
+    raise ConsentMLError(f"unrecognized store target: {target!r}")

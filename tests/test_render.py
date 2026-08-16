@@ -7,13 +7,13 @@ import pytest
 from consentml.export import build_dossier
 from consentml.hashing import hash_subject_id
 from consentml.render import render_html, render_json
-from consentml.store import LineageStore
+from consentml.store import SQLiteLineageStore
 
 
 @pytest.fixture
 def dossier(tmp_path):
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",
@@ -49,7 +49,7 @@ def test_render_html_leads_with_failure_when_verification_failed(tmp_path):
     import sqlite3
 
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",
@@ -74,7 +74,7 @@ def test_render_html_leads_with_failure_when_verification_failed(tmp_path):
 
 def test_render_html_escapes_hostile_model_names(tmp_path):
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="<script>alert(1)</script>",
@@ -95,7 +95,7 @@ def test_render_html_escapes_hostile_model_names(tmp_path):
 
 def test_render_html_escapes_the_subject_id(tmp_path):
     db = tmp_path / "lineage.db"
-    LineageStore(db_path=db).close()
+    SQLiteLineageStore(db_path=db).close()
     dossier = build_dossier(subject_id="<img src=x onerror=1>", db_path=db)
     html = render_html(dossier)
     assert "<img src=x onerror=1>" not in html
@@ -108,7 +108,7 @@ def test_render_html_lists_recorded_revocation_events(tmp_path):
     from consentml.revoke import revoke
 
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",
@@ -134,7 +134,7 @@ def test_render_html_says_when_no_revocation_was_recorded(dossier):
 
 def test_render_html_says_so_when_no_models_were_affected(tmp_path):
     db = tmp_path / "lineage.db"
-    LineageStore(db_path=db).close()
+    SQLiteLineageStore(db_path=db).close()
     html = render_html(build_dossier(subject_id="nobody@x.com", db_path=db))
     assert "No models were trained" in html
 
@@ -148,7 +148,7 @@ def test_render_html_shows_unreadable_provenance_visibly(tmp_path):
     import sqlite3
 
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",
@@ -219,7 +219,7 @@ def test_render_html_dumps_provenance_that_has_no_label(tmp_path):
     Postgres, so this covers the fallback without a live database.
     """
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",
@@ -282,7 +282,7 @@ def test_render_pdf_lists_recorded_revocation_events(tmp_path):
     from consentml.revoke import revoke
 
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",
@@ -305,7 +305,7 @@ def test_render_pdf_handles_a_dossier_with_no_models(tmp_path):
     from consentml.render import render_pdf
 
     db = tmp_path / "lineage.db"
-    LineageStore(db_path=db).close()
+    SQLiteLineageStore(db_path=db).close()
     data = render_pdf(build_dossier(subject_id="nobody@x.com", db_path=db))
     assert data.startswith(b"%PDF")
 
@@ -336,7 +336,7 @@ def test_render_pdf_handles_unreadable_provenance(tmp_path):
     from consentml.render import render_pdf
 
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",
@@ -442,7 +442,7 @@ def test_render_pdf_dumps_provenance_that_has_no_label(tmp_path):
     from consentml.render import render_pdf
 
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",

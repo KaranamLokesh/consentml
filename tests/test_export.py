@@ -12,14 +12,14 @@ import pytest
 
 from consentml.export import build_dossier
 from consentml.hashing import hash_subject_id
-from consentml.store import LineageStore
+from consentml.store import SQLiteLineageStore
 
 
 @pytest.fixture
 def seeded_db(tmp_path):
     """Two models sharing one subject; churn_v3 also has a later run."""
     db = tmp_path / "lineage.db"
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="churn_v3",
