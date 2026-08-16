@@ -200,7 +200,44 @@ class SnowflakeLineageStore(LineageStore):
 
     def record_revocation(self, *, subject_key, n_affected_runs,
                           recommended_actions) -> int:
-        raise NotImplementedError
+        # Decision point (see task-4-8-report.md "record_revocation return
+        # value"): revoke.py stores this return in
+        # AffectedModelsReport.audit_log_entry_id, which is exposed via
+        # to_dict() and printed by cli.py, and test_revoke.py:61 asserts it
+        # equals the actual audit_log row id -- so it is load-bearing, not
+        # ignorable. SQLite's cursor.lastrowid is the true row id; Snowflake
+        # has no lastrowid, so read it back with SELECT MAX(id) inside the
+        # same transaction instead of returning a mere COUNT(*) (which can
+        # diverge from the true id if any earlier insert in this table was
+        # ever rolled back, leaving a gap in the IDENTITY sequence).
+        cur = self._conn.cursor()
+        try:
+            with cur:
+                self._append_audit_entry(
+                    cur,
+                    event_type="revocation",
+                    payload=json.dumps(
+                        {
+                            "subject_key": subject_key,
+                            "n_affected_runs": n_affected_runs,
+                            "recommended_actions": recommended_actions,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+                cur.execute("SELECT MAX(id) FROM audit_log")
+                entry_id = cur.fetchone()[0]
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return entry_id
 
     def audit_entries(self) -> list[dict]:
-        raise NotImplementedError
+        cols = ["id", "timestamp", "event_type", "payload", "prev_hash", "entry_hash"]
+        cur = self._conn.cursor()
+        with cur:
+            cur.execute(
+                "SELECT id, timestamp, event_type, payload, prev_hash, entry_hash "
+                "FROM audit_log ORDER BY id")
+            return [dict(zip(cols, row)) for row in cur.fetchall()]

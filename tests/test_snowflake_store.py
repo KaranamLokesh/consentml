@@ -81,3 +81,21 @@ def test_read_methods(monkeypatch):
         assert store.latest_run_for_model("missing") is None
     finally:
         store.close()
+
+
+def test_revocation_and_audit_entries_chain(monkeypatch):
+    store = _store(monkeypatch)
+    try:
+        store.record_training_run(
+            model_name="m", model_hash="h", provenance={"kind": "snowflake"},
+            subject_ids_hashed=True, subject_id_values=["a"],
+            started_at="2026-01-01T00:00:00+00:00", finished_at="2026-01-01T00:00:01+00:00")
+        store.record_revocation(subject_key="hashed-a", n_affected_runs=1,
+                                recommended_actions=["retrain"])
+        entries = store.audit_entries()
+        assert [e["event_type"] for e in entries] == ["training_run", "revocation"]
+        # chain links: each prev_hash equals the previous entry_hash
+        assert entries[0]["prev_hash"] == "0" * 64
+        assert entries[1]["prev_hash"] == entries[0]["entry_hash"]
+    finally:
+        store.close()
