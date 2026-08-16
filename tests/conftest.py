@@ -267,6 +267,39 @@ def pg_dsn():
 
 
 @pytest.fixture
+def snowflake_conn():
+    """Connection dict for a real Snowflake test account.
+
+    Skips (does NOT fail) when unconfigured: unlike the Postgres fixture, no
+    local Snowflake can be stood up in CI, so absence is the normal case for
+    most runs. The gate is the account var; when it is present the rest are
+    required and their absence is a real error.
+    """
+    account = os.environ.get("CONSENTML_SNOWFLAKE_TEST_ACCOUNT")
+    if not account:
+        pytest.skip("CONSENTML_SNOWFLAKE_TEST_ACCOUNT not set; skipping live test")
+    conn = {
+        "account": account,
+        "user": os.environ["CONSENTML_SNOWFLAKE_TEST_USER"],
+        "database": os.environ["CONSENTML_SNOWFLAKE_TEST_DATABASE"],
+        "schema": os.environ.get("CONSENTML_SNOWFLAKE_TEST_SCHEMA", "PUBLIC"),
+        "warehouse": os.environ["CONSENTML_SNOWFLAKE_TEST_WAREHOUSE"],
+    }
+    role = os.environ.get("CONSENTML_SNOWFLAKE_TEST_ROLE")
+    if role:
+        conn["role"] = role
+    pw = os.environ.get("CONSENTML_SNOWFLAKE_TEST_PASSWORD")
+    key_file = os.environ.get("CONSENTML_SNOWFLAKE_TEST_PRIVATE_KEY_FILE")
+    if pw:
+        conn["password"] = pw
+    elif key_file:
+        conn["private_key_file"] = key_file
+    else:
+        raise RuntimeError("set CONSENTML_SNOWFLAKE_TEST_PASSWORD or _PRIVATE_KEY_FILE")
+    return conn
+
+
+@pytest.fixture
 def pg_tables(pg_dsn):
     """A patients/labs pair to join, dropped afterwards."""
     import psycopg

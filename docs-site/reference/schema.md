@@ -72,3 +72,38 @@ v0 and v1 databases can still be read — `consentml verify` and
 `@track` and a recording `revoke()` call raise until the database is
 migrated. See [Migrating a database](../guides/migrating.md) for what
 `consentml migrate` does and what it preserves.
+
+## Alternative backend: Snowflake
+
+The CLI is SQLite-only, but the Python API can open a `SnowflakeLineageStore`
+instead — same `LineageStore` interface, same hash-chain formula, so an audit
+log written to Snowflake verifies under the same `consentml verify` logic as
+a SQLite one. Pass a connection dict, either directly or through
+`open_store`:
+
+```python
+from consentml.store import open_store
+
+store = open_store({
+    "account": "myorg-myaccount",
+    "user": "svc_consentml",
+    "password": "...",
+    "database": "CONSENTML",
+    "schema": "PUBLIC",
+    "warehouse": "COMPUTE_WH",
+})
+```
+
+or construct it directly: `SnowflakeLineageStore(connection={...})`. A
+`snowflake://` URI is deliberately not accepted — it can't safely carry a
+password or key, so credentials must go through the dict. Install the
+connector with the optional extra:
+
+```bash
+pip install 'consentml[snowflake]'
+```
+
+**Single writer.** The audit append is a read-then-insert with no
+cross-writer locking; two concurrent writers against the same store can fork
+the hash chain. Coordinating multiple writers is out of scope — use one
+writer per lineage store.
