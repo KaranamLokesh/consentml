@@ -46,7 +46,7 @@ GENESIS = "0" * 64
 def append_audit_entry(path, event_type, payload) -> str:
     """Append one hash-chained audit_log row to the database at path.
 
-    Mirrors LineageStore._append_audit_entry's arithmetic exactly (sha256 of
+    Mirrors SQLiteLineageStore._append_audit_entry's arithmetic exactly (sha256 of
     prev_hash + timestamp + event_type + payload, prev_hash taken from the
     current last row or GENESIS if the log is empty). Extracted here because
     this same arithmetic used to be re-derived independently in

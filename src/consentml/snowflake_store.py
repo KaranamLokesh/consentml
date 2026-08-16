@@ -95,6 +95,13 @@ def _connect(connection: dict):
 
 
 class SnowflakeLineageStore(LineageStore):
+    """Snowflake-backed implementation of LineageStore.
+
+    CONCURRENCY: single logical writer per lineage table. Concurrent writers
+    appending to the same audit chain can fork it; coordinating multiple
+    writers is an explicit non-goal.
+    """
+
     def __init__(self, *, connection):
         self._conn = _connect(connection)
         self._create_schema()
