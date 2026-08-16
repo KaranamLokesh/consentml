@@ -404,12 +404,17 @@ class SQLiteLineageStore(LineageStore):
 def open_store(target=None, *, db_path=None, **kwargs) -> "LineageStore":
     """Return a LineageStore for `target`.
 
-    SQLite is the default and the only backend this factory builds today:
-    a None/omitted target, or an explicit db_path, yields SQLiteLineageStore.
-    The Snowflake branch (a 'snowflake://' target or a connection dict) is
-    added in the Snowflake store task; until then this stays SQLite-only so
-    the CLI and every existing caller behave exactly as before.
+    SQLite is the default backend: a None/omitted target, or an explicit
+    db_path, yields SQLiteLineageStore. A dict target, or a string starting
+    'snowflake://', routes to SnowflakeLineageStore instead -- the connector
+    import happens lazily inside this branch so consentml.store stays
+    connector-free at import time. This factory is Python-API only; the CLI
+    stays SQLite-only.
     """
+    if isinstance(target, dict) or (isinstance(target, str) and target.startswith("snowflake://")):
+        from consentml.snowflake_store import SnowflakeLineageStore, parse_snowflake_uri
+        connection = target if isinstance(target, dict) else parse_snowflake_uri(target)
+        return SnowflakeLineageStore(connection=connection)
     if db_path is not None and target is None:
         return SQLiteLineageStore(db_path=db_path)
     if target is None or isinstance(target, (str, __import__("pathlib").Path)):

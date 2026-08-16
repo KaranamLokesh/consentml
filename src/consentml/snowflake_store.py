@@ -60,6 +60,17 @@ _DDL = [
 ]
 
 
+def parse_snowflake_uri(uri: str) -> dict:
+    """Deliberately unsupported: a 'snowflake://' string cannot safely carry
+    a password or key, so v1 does not parse one into a connection dict.
+    Pass credentials via a connection dict instead -- see
+    SnowflakeLineageStore(connection={...}) / open_store({...})."""
+    raise ConsentMLError(
+        "pass Snowflake credentials via a connection dict, not a URI -- "
+        "e.g. open_store({'account': ..., 'user': ..., 'password': ...})"
+    )
+
+
 def _import_connector():
     try:
         import snowflake.connector as connector

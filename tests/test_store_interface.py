@@ -27,3 +27,15 @@ def test_open_store_defaults_to_sqlite(tmp_path):
         assert isinstance(store, SQLiteLineageStore)
     finally:
         store.close()
+
+
+def test_open_store_dict_target_builds_snowflake(monkeypatch):
+    from tests.fakes.snowflake import shim_connect
+    from consentml import snowflake_store as sfs
+    monkeypatch.setattr(sfs, "_connect", shim_connect)
+    store = open_store({"account": "a", "user": "u", "password": "p",
+                        "database": "D", "schema": "S", "warehouse": "W"})
+    try:
+        assert type(store).__name__ == "SnowflakeLineageStore"
+    finally:
+        store.close()
