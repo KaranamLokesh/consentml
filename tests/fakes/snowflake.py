@@ -59,3 +59,61 @@ class ShimConnection:
 
 def shim_connect(connection: dict) -> ShimConnection:
     return ShimConnection()
+
+
+# --- Scripted double for SnowflakeSource -----------------------------------
+#
+# Deterministic and account-free: unit tests match issued SQL against a
+# script of canned responses. This exercises SnowflakeSource's own logic
+# (dataframe build, subject-id contract, provenance) without a network or
+# credentials; real SQL fidelity is the job of the gated live tests. This is
+# a different class from ShimConnection above -- ShimConnection backs the
+# store's richer in-memory DDL/DML shim; FakeSnowflakeConnection only ever
+# needs to answer an EXPLAIN and one SELECT.
+
+
+class _Col:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeCursor:
+    def __init__(self, script):
+        self._script = script
+        self._rows = []
+        self.description = None
+        self.connection = None
+
+    def execute(self, sql):
+        for substr, rows, names in self._script:
+            if substr in sql:
+                self._rows = rows
+                self.description = [_Col(n) for n in names] if names else None
+                return self
+        raise AssertionError(f"unscripted SQL: {sql!r}")
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class FakeSnowflakeConnection:
+    def __init__(self, script):
+        self._script = script
+        self.closed = False
+
+    def cursor(self):
+        cur = _FakeCursor(self._script)
+        cur.connection = self
+        return cur
+
+    def close(self):
+        self.closed = True
