@@ -61,3 +61,23 @@ def test_record_training_run_writes_run_subjects_and_audit(monkeypatch):
         assert rows[0][1] == "0" * 64
     finally:
         store.close()
+
+
+def test_read_methods(monkeypatch):
+    store = _store(monkeypatch)
+    try:
+        rid = store.record_training_run(
+            model_name="churn", model_hash="h1", provenance={"kind": "snowflake"},
+            subject_ids_hashed=True, subject_id_values=["a", "b"],
+            started_at="2026-01-01T00:00:00+00:00", finished_at="2026-01-01T00:00:01+00:00")
+        assert store.all_run_ids() == {rid}
+        assert store.run_by_id(rid)["model_name"] == "churn"
+        assert store.latest_run_for_model("churn")["run_id"] == rid
+        assert store.subject_count_for_run(rid) == 2
+        runs = store.runs_for_subject_value("a")
+        assert [r["run_id"] for r in runs] == [rid]
+        assert store.runs_for_subject_value("nobody") == []
+        assert store.run_by_id("missing") is None
+        assert store.latest_run_for_model("missing") is None
+    finally:
+        store.close()

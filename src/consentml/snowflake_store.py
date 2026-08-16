@@ -153,20 +153,50 @@ class SnowflakeLineageStore(LineageStore):
             (timestamp, event_type, payload, prev_hash, entry_hash),
         )
 
+    def _run_row_to_dict(self, row):
+        return dict(zip(_RUN_COLS, row))
+
     def runs_for_subject_value(self, subject_id_value) -> list[dict]:
-        raise NotImplementedError
+        cols = ", ".join(f"r.{c}" for c in _RUN_COLS)
+        cur = self._conn.cursor()
+        with cur:
+            cur.execute(
+                f"SELECT {cols} FROM training_runs r "
+                "JOIN subject_index s ON s.run_id = r.run_id "
+                "WHERE s.subject_key = ? ORDER BY r.started_at",
+                (subject_id_value,),
+            )
+            return [self._run_row_to_dict(row) for row in cur.fetchall()]
 
     def latest_run_for_model(self, model_name) -> dict | None:
-        raise NotImplementedError
+        cols = ", ".join(_RUN_COLS)
+        cur = self._conn.cursor()
+        with cur:
+            cur.execute(
+                f"SELECT {cols} FROM training_runs WHERE model_name = ? "
+                "ORDER BY started_at DESC LIMIT 1", (model_name,))
+            row = cur.fetchone()
+        return self._run_row_to_dict(row) if row else None
 
     def run_by_id(self, run_id) -> dict | None:
-        raise NotImplementedError
+        cols = ", ".join(_RUN_COLS)
+        cur = self._conn.cursor()
+        with cur:
+            cur.execute(f"SELECT {cols} FROM training_runs WHERE run_id = ?", (run_id,))
+            row = cur.fetchone()
+        return self._run_row_to_dict(row) if row else None
 
     def subject_count_for_run(self, run_id) -> int:
-        raise NotImplementedError
+        cur = self._conn.cursor()
+        with cur:
+            cur.execute("SELECT COUNT(*) FROM subject_index WHERE run_id = ?", (run_id,))
+            return cur.fetchone()[0]
 
     def all_run_ids(self) -> set:
-        raise NotImplementedError
+        cur = self._conn.cursor()
+        with cur:
+            cur.execute("SELECT run_id FROM training_runs")
+            return {row[0] for row in cur.fetchall()}
 
     def record_revocation(self, *, subject_key, n_affected_runs,
                           recommended_actions) -> int:
