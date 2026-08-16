@@ -114,3 +114,43 @@ def test_null_subject_id_raises(monkeypatch):
     _install(monkeypatch, [(None, 30), ("P2", 40)])
     with pytest.raises(ConsentMLError, match="null"):
         SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load()
+
+
+# --- Task 5: best-effort referenced_tables via EXPLAIN USING JSON ---------
+
+
+def _script_with_plan(rows, plan, names=("PATIENT_ID", "AGE")):
+    return [("EXPLAIN", [(json.dumps(plan),)], ["EXPLAIN"]), ("SELECT", rows, names)]
+
+
+def test_explain_reports_referenced_tables(monkeypatch):
+    from consentml.sources import snowflake as sf
+    plan = {"Operations": [[{"objects": ["DB.PUBLIC.PATIENTS"]}]]}
+    monkeypatch.setattr(sf, "_connect", lambda c: FakeSnowflakeConnection(
+        _script_with_plan([("P1", 30)], plan)))
+    p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
+    assert p["referenced_tables"] == ["DB.PUBLIC.PATIENTS"]
+    assert p["referenced_tables_source"] == "explain"
+
+
+def test_explain_failure_degrades_without_failing_the_run(monkeypatch):
+    from consentml.sources import snowflake as sf
+
+    def boom(cur, query):
+        raise sf._ExplainUnavailable()
+
+    monkeypatch.setattr(sf, "_run_explain", boom)
+    monkeypatch.setattr(sf, "_connect", lambda c: FakeSnowflakeConnection(
+        _script([("P1", 30)])))
+    p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
+    assert p["referenced_tables"] is None
+    assert p["referenced_tables_source"] == "unavailable"
+
+
+def test_referenced_tables_are_sorted(monkeypatch):
+    from consentml.sources import snowflake as sf
+    monkeypatch.setattr(sf, "_relations", lambda plan, found: {"B.S.ZZZ", "B.S.AAA"})
+    monkeypatch.setattr(sf, "_connect", lambda c: FakeSnowflakeConnection(
+        _script_with_plan([("P1", 30)], {"Operations": []})))
+    p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
+    assert p["referenced_tables"] == ["B.S.AAA", "B.S.ZZZ"]

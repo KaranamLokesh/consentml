@@ -8,6 +8,7 @@ a role with read-only grants. This limitation is documented on the class.
 """
 
 import hashlib
+import json
 
 import pandas as pd
 
@@ -45,6 +46,45 @@ def _safe_conninfo(connection: dict) -> dict:
     """
     lower = {k.lower(): v for k, v in connection.items()}
     return {k: lower.get(k) for k in _SAFE_KEYS}
+
+
+class _ExplainUnavailable(Exception):
+    """EXPLAIN could not be run or parsed. Never reaches the caller."""
+
+
+_TABLE_KEYS = ("objects", "table", "Relation Name")
+
+
+def _relations(node, found):
+    """Collect table-like names from a Snowflake EXPLAIN JSON node.
+
+    Best-effort and tolerant: the JSON shape is not a stable contract, so this
+    walks the whole document and harvests string values found under any key in
+    _TABLE_KEYS, whether the value is a bare string or a list of strings.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _TABLE_KEYS:
+                if isinstance(value, str):
+                    found.add(value)
+                elif isinstance(value, list):
+                    found.update(v for v in value if isinstance(v, str))
+            _relations(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _relations(item, found)
+    return found
+
+
+def _run_explain(cur, query):
+    cur.execute("EXPLAIN USING JSON " + query)
+    row = cur.fetchone()
+    if not row or not row[0]:
+        raise _ExplainUnavailable()
+    try:
+        return json.loads(row[0])
+    except (TypeError, ValueError) as exc:
+        raise _ExplainUnavailable() from exc
 
 
 class SnowflakeSource:
@@ -91,7 +131,16 @@ class SnowflakeSource:
         )
 
     def _referenced_tables(self, cur):
-        return None, "unavailable"  # replaced in Task 5
+        """(sorted table list, mechanism) -- never raises.
+
+        Advisory: a failed EXPLAIN must not fail the training run.
+        """
+        connector = _import_connector()
+        try:
+            plan = _run_explain(cur, self._query)
+        except (_ExplainUnavailable, connector.errors.Error):
+            return None, "unavailable"
+        return sorted(_relations(plan, set())), "explain"
 
     def _fetch(self):
         connector = _import_connector()
