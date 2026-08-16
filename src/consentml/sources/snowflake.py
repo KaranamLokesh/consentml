@@ -33,8 +33,18 @@ def _connect(connection: dict):
     return connector.connect(**connection)
 
 
+_SAFE_KEYS = ("account", "database", "schema", "warehouse")
+
+
 def _safe_conninfo(connection: dict) -> dict:
-    return {}
+    """Account/database/schema/warehouse only -- never user, password, key.
+
+    Built by allow-list, not deny-list: an unknown future auth field cannot
+    leak because only the four safe keys are ever copied out. Keys are matched
+    case-insensitively because the connector accepts either case.
+    """
+    lower = {k.lower(): v for k, v in connection.items()}
+    return {k: lower.get(k) for k in _SAFE_KEYS}
 
 
 class SnowflakeSource:
