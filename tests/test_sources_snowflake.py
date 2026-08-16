@@ -154,3 +154,24 @@ def test_referenced_tables_are_sorted(monkeypatch):
         _script_with_plan([("P1", 30)], {"Operations": []})))
     p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
     assert p["referenced_tables"] == ["B.S.AAA", "B.S.ZZZ"]
+
+
+# --- Task 6: connection-failure credential safety --------------------------
+
+
+def test_credentials_never_appear_on_a_connection_failure(monkeypatch):
+    from consentml.sources import snowflake as sf
+    connector = sf._import_connector()
+
+    def boom(connection):
+        raise connector.errors.Error("connect refused")
+
+    monkeypatch.setattr(sf, "_connect", boom)
+    secret_conn = dict(CONN, user="sekret_user", password="sekret_pass")
+    with pytest.raises(ConsentMLError) as excinfo:
+        SnowflakeSource(connection=secret_conn, query=QUERY,
+                        subject_id_col="PATIENT_ID").load()
+    exc = excinfo.value
+    full = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert "sekret_user" not in full
+    assert "sekret_pass" not in full
