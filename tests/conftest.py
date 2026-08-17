@@ -288,14 +288,24 @@ def snowflake_conn():
     role = os.environ.get("CONSENTML_SNOWFLAKE_TEST_ROLE")
     if role:
         conn["role"] = role
+    # Auth, in preference order: a programmatic access token (PAT), then
+    # user/password, then key-pair. The connection dict is passed straight to
+    # snowflake.connector.connect(); token/authenticator/password/private_key
+    # are all stripped from provenance by _safe_conninfo's allow-list.
+    token = os.environ.get("CONSENTML_SNOWFLAKE_TEST_TOKEN")
     pw = os.environ.get("CONSENTML_SNOWFLAKE_TEST_PASSWORD")
     key_file = os.environ.get("CONSENTML_SNOWFLAKE_TEST_PRIVATE_KEY_FILE")
-    if pw:
+    if token:
+        conn["authenticator"] = "PROGRAMMATIC_ACCESS_TOKEN"
+        conn["token"] = token
+    elif pw:
         conn["password"] = pw
     elif key_file:
         conn["private_key_file"] = key_file
     else:
-        raise RuntimeError("set CONSENTML_SNOWFLAKE_TEST_PASSWORD or _PRIVATE_KEY_FILE")
+        raise RuntimeError(
+            "set CONSENTML_SNOWFLAKE_TEST_TOKEN, _PASSWORD, or _PRIVATE_KEY_FILE"
+        )
     return conn
 
 
