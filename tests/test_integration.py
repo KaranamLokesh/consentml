@@ -5,7 +5,7 @@ from sklearn.linear_model import LogisticRegression
 
 from consentml.revoke import revoke
 from consentml.sources import DataFrameSource
-from consentml.store import GENESIS_HASH, LineageStore
+from consentml.store import GENESIS_HASH, SQLiteLineageStore
 from consentml.track import track
 
 
@@ -43,7 +43,7 @@ def test_track_then_revoke_end_to_end(tmp_path):
     assert {a["action"] for a in report.recommended_actions} == {"retrain"}
 
     # Audit log: 2 training events + 1 revocation, chain intact end-to-end.
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         entries = store.audit_entries()
     finally:

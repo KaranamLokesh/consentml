@@ -50,6 +50,28 @@ Requires `pip install 'consentml[postgres]'`. Queries run in a read-only
 transaction; ConsentML never writes to the database it reads from. Credentials
 are never recorded — the stored provenance keeps host, port and database only.
 
+`SnowflakeSource` works the same way, against Snowflake instead of Postgres:
+
+```python
+from consentml.sources.snowflake import SnowflakeSource
+
+@track(
+    model_name="readmission-risk",
+    source=SnowflakeSource(
+        connection={"account": "xy12345", "user": "svc_ml", "password": "...",
+                    "database": "CLINIC", "schema": "PUBLIC", "warehouse": "WH_ML"},
+        query="SELECT patient_id, age, ldl, outcome FROM patients",
+        subject_id_col="patient_id",
+    ),
+)
+def train(df): ...
+```
+
+Requires `pip install 'consentml[snowflake]'`. Unlike `PostgresSource`,
+ConsentML does **not** enforce read-only here — Snowflake exposes no
+connection-level read-only flag, so the `connection` you pass in must use a
+role with read-only grants.
+
 For data already in memory:
 
 ```python

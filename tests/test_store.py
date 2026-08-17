@@ -5,13 +5,13 @@ import sqlite3
 import pytest
 
 from consentml.errors import ConsentMLError
-from consentml.store import LineageStore, default_db_path, provenance_hash, provenance_text
+from consentml.store import SQLiteLineageStore, default_db_path, provenance_hash, provenance_text
 from consentml.verify import verify_audit_log
 
 
 @pytest.fixture
 def store(tmp_path):
-    s = LineageStore(db_path=tmp_path / "lineage.db")
+    s = SQLiteLineageStore(db_path=tmp_path / "lineage.db")
     yield s
     s.close()
 
@@ -33,7 +33,7 @@ def test_creates_schema_on_init(store, tmp_path):
 
 
 def test_creates_parent_directory(tmp_path):
-    s = LineageStore(db_path=tmp_path / "nested" / "dir" / "lineage.db")
+    s = SQLiteLineageStore(db_path=tmp_path / "nested" / "dir" / "lineage.db")
     s.close()
     assert (tmp_path / "nested" / "dir" / "lineage.db").exists()
 
@@ -59,8 +59,8 @@ def test_subject_index_is_indexed(store, tmp_path):
 
 
 def test_init_is_idempotent(tmp_path):
-    LineageStore(db_path=tmp_path / "lineage.db").close()
-    LineageStore(db_path=tmp_path / "lineage.db").close()
+    SQLiteLineageStore(db_path=tmp_path / "lineage.db").close()
+    SQLiteLineageStore(db_path=tmp_path / "lineage.db").close()
 
 
 def test_default_db_path_env_override(monkeypatch, tmp_path):
@@ -244,7 +244,7 @@ def test_subject_count_for_run_after_interning(store):
 
 
 def test_legacy_database_reports_version_zero(legacy_db):
-    s = LineageStore(db_path=legacy_db)
+    s = SQLiteLineageStore(db_path=legacy_db)
     try:
         assert s.schema_version == 0
     finally:
@@ -253,12 +253,12 @@ def test_legacy_database_reports_version_zero(legacy_db):
 
 def test_legacy_database_is_not_modified_on_open(legacy_db):
     before = legacy_db.read_bytes()
-    LineageStore(db_path=legacy_db).close()
+    SQLiteLineageStore(db_path=legacy_db).close()
     assert legacy_db.read_bytes() == before
 
 
 def test_legacy_reads_work(legacy_db):
-    s = LineageStore(db_path=legacy_db)
+    s = SQLiteLineageStore(db_path=legacy_db)
     try:
         runs = s.runs_for_subject_value("h1")
         assert [r["model_name"] for r in runs] == ["churn_v3", "upsell"]
@@ -274,7 +274,7 @@ def test_legacy_reads_work(legacy_db):
 
 
 def test_legacy_writes_are_refused(legacy_db):
-    s = LineageStore(db_path=legacy_db)
+    s = SQLiteLineageStore(db_path=legacy_db)
     try:
         with pytest.raises(ConsentMLError, match="consentml migrate"):
             _record_sample_run(s)
@@ -289,7 +289,7 @@ def test_legacy_writes_are_refused(legacy_db):
 def test_v1_database_reports_version_one(tmp_path, build_v1):
     path = tmp_path / "v1.db"
     build_v1(path)
-    s = LineageStore(db_path=path)
+    s = SQLiteLineageStore(db_path=path)
     try:
         assert s.schema_version == 1
     finally:
@@ -303,7 +303,7 @@ def test_v1_database_reads_work(tmp_path, build_v1):
     must keep working against it, not raise OperationalError."""
     path = tmp_path / "v1.db"
     run_id = build_v1(path)[0]
-    s = LineageStore(db_path=path)
+    s = SQLiteLineageStore(db_path=path)
     try:
         assert s.run_by_id(run_id)["model_name"] == "churn_v3"
         # A v1 row's "provenance" is the old free-text data_source value,
@@ -321,7 +321,7 @@ def test_v1_database_reads_work(tmp_path, build_v1):
 def test_v1_database_writes_are_refused(tmp_path, build_v1):
     path = tmp_path / "v1.db"
     build_v1(path)
-    s = LineageStore(db_path=path)
+    s = SQLiteLineageStore(db_path=path)
     try:
         with pytest.raises(ConsentMLError, match="consentml migrate"):
             _record_sample_run(s)
@@ -342,7 +342,7 @@ def test_v1_database_verifies_without_raising(tmp_path, build_v1):
 
 
 def test_provenance_is_stored_as_sorted_json(tmp_path):
-    store = LineageStore(db_path=tmp_path / "l.db")
+    store = SQLiteLineageStore(db_path=tmp_path / "l.db")
     run_id = store.record_training_run(
         model_name="m",
         model_hash="mh",
@@ -372,7 +372,7 @@ def test_provenance_hash_is_stable_across_key_order():
 
 
 def test_audit_payload_carries_provenance_sha256_not_data_source(tmp_path):
-    store = LineageStore(db_path=tmp_path / "l.db")
+    store = SQLiteLineageStore(db_path=tmp_path / "l.db")
     provenance = {"kind": "dataframe", "label": "x", "n_rows": 1}
     store.record_training_run(
         model_name="m",
@@ -401,7 +401,7 @@ def test_provenance_hash_of_non_string_is_none():
 
 
 def test_schema_version_is_2(tmp_path):
-    store = LineageStore(db_path=tmp_path / "l.db")
+    store = SQLiteLineageStore(db_path=tmp_path / "l.db")
     assert store.schema_version == 2
     assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
     cols = [c[1] for c in store._conn.execute("PRAGMA table_info(training_runs)")]

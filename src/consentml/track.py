@@ -6,7 +6,7 @@ import pickle
 from datetime import datetime, timezone
 
 from consentml.hashing import hash_subject_id
-from consentml.store import LineageStore
+from consentml.store import open_store
 
 
 def track(*, model_name, source, hash_subject_ids=True, db_path=None):
@@ -36,7 +36,7 @@ def track(*, model_name, source, hash_subject_ids=True, db_path=None):
             finished_at = datetime.now(timezone.utc).isoformat()
 
             model_hash = hashlib.sha256(pickle.dumps(model)).hexdigest()
-            store = LineageStore(db_path=db_path)
+            store = open_store(db_path=db_path)
             try:
                 store.record_training_run(
                     model_name=model_name,

@@ -8,7 +8,7 @@ import pytest
 import consentml.migrate as migrate_mod
 from consentml.migrate import MigrationResult, migrate_database
 from consentml.revoke import revoke
-from consentml.store import LineageStore
+from consentml.store import SQLiteLineageStore
 from consentml.verify import (
     VerificationFinding,
     VerificationReport,
@@ -25,7 +25,7 @@ def test_migrates_a_legacy_database(legacy_db):
     assert isinstance(result, MigrationResult)
     assert result.migrated is True
     assert result.already_current is False
-    s = LineageStore(db_path=legacy_db)
+    s = SQLiteLineageStore(db_path=legacy_db)
     try:
         assert s.schema_version == 2
     finally:

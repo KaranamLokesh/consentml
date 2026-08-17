@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
 from consentml.hashing import hash_subject_id
-from consentml.store import LineageStore
+from consentml.store import open_store
 
 
 @dataclass
@@ -77,7 +77,7 @@ def revoke(*, subject_id, db_path=None, dry_run=False) -> AffectedModelsReport:
     revocation event to the audit log (payload holds the hashed key only).
     """
     subject_key = hash_subject_id(subject_id)
-    store = LineageStore(db_path=db_path)
+    store = open_store(db_path=db_path)
     try:
         runs = {
             r["run_id"]: r

@@ -1,0 +1,260 @@
+import builtins
+import hashlib
+import json
+import traceback
+
+import pytest
+
+from consentml import ConsentMLError
+from consentml.sources.snowflake import SnowflakeSource
+from tests.fakes.snowflake import FakeSnowflakeConnection
+
+MINIMAL_CONN = {
+    "account": "acct",
+    "user": "u",
+    "password": "p",
+    "database": "DB",
+    "schema": "PUBLIC",
+    "warehouse": "WH",
+}
+
+CONN = {"account": "acct", "user": "u", "password": "p",
+        "database": "DB", "schema": "PUBLIC", "warehouse": "WH"}
+QUERY = "SELECT patient_id, age FROM patients"
+
+
+def test_missing_connector_raises_consentml_error(monkeypatch):
+    from consentml.sources.snowflake import SnowflakeSource
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("snowflake"):
+            raise ImportError("no snowflake connector")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ConsentMLError, match="pip install"):
+        SnowflakeSource(connection=MINIMAL_CONN, query="SELECT 1", subject_id_col="x")
+
+
+def test_conninfo_never_leaks_credentials():
+    from consentml.sources.snowflake import _safe_conninfo
+
+    info = _safe_conninfo({
+        "account": "acct", "user": "sekret_user", "password": "sekret_pass",
+        "private_key": b"KEYBYTES", "database": "DB", "schema": "S", "warehouse": "WH",
+    })
+    flat = repr(info)
+    assert info == {"account": "acct", "database": "DB", "schema": "S", "warehouse": "WH"}
+    assert "sekret_user" not in flat
+    assert "sekret_pass" not in flat
+    assert "KEYBYTES" not in flat
+
+
+# --- Task 4: load() -- dataframe, subject-id contract, provenance ---------
+
+
+def _script(rows, names=("PATIENT_ID", "AGE")):
+    # EXPLAIN returns no usable plan here (mechanism -> unavailable); the real
+    # query returns the given rows. Order matters: EXPLAIN is matched first.
+    return [("EXPLAIN", [], None), ("SELECT", rows, names)]
+
+
+def _install(monkeypatch, rows, names=("PATIENT_ID", "AGE")):
+    from consentml.sources import snowflake as sf
+    monkeypatch.setattr(sf, "_connect",
+                        lambda connection: FakeSnowflakeConnection(_script(rows, names)))
+
+
+def test_loads_rows_into_a_dataframe(monkeypatch):
+    _install(monkeypatch, [("P1", 30), ("P2", 40), ("P3", 50)])
+    result = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load()
+    assert list(result.payload.columns) == ["PATIENT_ID", "AGE"]
+    assert len(result.payload) == 3
+
+
+def test_subject_ids_distinct_stringified(monkeypatch):
+    _install(monkeypatch, [(1, 30), (1, 31), (2, 40)])  # int ids, repeated
+    result = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load()
+    assert sorted(result.subject_ids) == ["1", "2"]
+    assert all(isinstance(s, str) for s in result.subject_ids)
+
+
+def test_provenance_records_query_hash_and_excludes_credentials(monkeypatch):
+    _install(monkeypatch, [("P1", 30)])
+    p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
+    assert p["kind"] == "snowflake"
+    assert p["database"] == "DB"
+    assert p["query_sha256"] == hashlib.sha256(QUERY.encode("utf-8")).hexdigest()
+    assert p["n_rows"] == 1
+    # NOTE: the brief's literal assertion here was `"u" not in repr(p)...`,
+    # which is unsatisfiable regardless of correctness -- the mandated
+    # "query" key contains the letter "u". Replaced with a key/value check
+    # that actually pins the "no user field" intent, mirroring
+    # test_credentials_never_appear_in_provenance in test_sources_postgres.py.
+    assert "user" not in p
+    assert "password" not in p
+    assert "password" not in repr(p)
+
+
+def test_missing_subject_column_raises(monkeypatch):
+    _install(monkeypatch, [("P1", 30)])
+    with pytest.raises(ConsentMLError, match="nope"):
+        SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="nope").load()
+
+
+def test_empty_result_raises(monkeypatch):
+    _install(monkeypatch, [])
+    with pytest.raises(ConsentMLError, match="no rows"):
+        SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load()
+
+
+def test_null_subject_id_raises(monkeypatch):
+    _install(monkeypatch, [(None, 30), ("P2", 40)])
+    with pytest.raises(ConsentMLError, match="null"):
+        SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load()
+
+
+# --- Task 5: best-effort referenced_tables via EXPLAIN USING JSON ---------
+
+
+def _script_with_plan(rows, plan, names=("PATIENT_ID", "AGE")):
+    return [("EXPLAIN", [(json.dumps(plan),)], ["EXPLAIN"]), ("SELECT", rows, names)]
+
+
+def test_explain_reports_referenced_tables(monkeypatch):
+    from consentml.sources import snowflake as sf
+    plan = {"Operations": [[{"objects": ["DB.PUBLIC.PATIENTS"]}]]}
+    monkeypatch.setattr(sf, "_connect", lambda c: FakeSnowflakeConnection(
+        _script_with_plan([("P1", 30)], plan)))
+    p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
+    assert p["referenced_tables"] == ["DB.PUBLIC.PATIENTS"]
+    assert p["referenced_tables_source"] == "explain"
+
+
+def test_explain_failure_degrades_without_failing_the_run(monkeypatch):
+    from consentml.sources import snowflake as sf
+
+    def boom(cur, query):
+        raise sf._ExplainUnavailable()
+
+    monkeypatch.setattr(sf, "_run_explain", boom)
+    monkeypatch.setattr(sf, "_connect", lambda c: FakeSnowflakeConnection(
+        _script([("P1", 30)])))
+    p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
+    assert p["referenced_tables"] is None
+    assert p["referenced_tables_source"] == "unavailable"
+
+
+def test_referenced_tables_are_sorted(monkeypatch):
+    from consentml.sources import snowflake as sf
+    monkeypatch.setattr(sf, "_relations", lambda plan, found: {"B.S.ZZZ", "B.S.AAA"})
+    monkeypatch.setattr(sf, "_connect", lambda c: FakeSnowflakeConnection(
+        _script_with_plan([("P1", 30)], {"Operations": []})))
+    p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
+    assert p["referenced_tables"] == ["B.S.AAA", "B.S.ZZZ"]
+
+
+def test_explain_reports_a_bare_string_table_value(monkeypatch):
+    # _relations has two branches under a _TABLE_KEYS hit: a bare string value
+    # (found.add) and a list of strings (found.update). The other tests above
+    # only ever exercise "objects": [...] (a list); this plan uses
+    # "Relation Name": "..." (a bare string) to hit the sibling branch.
+    from consentml.sources import snowflake as sf
+    plan = {"Operations": [[{"Relation Name": "DB.PUBLIC.PATIENTS"}]]}
+    monkeypatch.setattr(sf, "_connect", lambda c: FakeSnowflakeConnection(
+        _script_with_plan([("P1", 30)], plan)))
+    p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
+    assert p["referenced_tables"] == ["DB.PUBLIC.PATIENTS"]
+    assert p["referenced_tables_source"] == "explain"
+
+
+def test_run_explain_raises_explain_unavailable_on_unparseable_json():
+    from consentml.sources.snowflake import _run_explain, _ExplainUnavailable
+
+    class _UnparseableCursor:
+        def execute(self, sql):
+            return self
+
+        def fetchone(self):
+            return ("not json{",)
+
+    with pytest.raises(_ExplainUnavailable):
+        _run_explain(_UnparseableCursor(), "SELECT 1")
+
+
+# --- Task 6: connection-failure credential safety --------------------------
+
+
+def test_credentials_never_appear_on_a_connection_failure(monkeypatch):
+    from consentml.sources import snowflake as sf
+    connector = sf._import_connector()
+
+    def boom(connection):
+        raise connector.errors.Error("connect refused")
+
+    monkeypatch.setattr(sf, "_connect", boom)
+    secret_conn = dict(CONN, user="sekret_user", password="sekret_pass")
+    with pytest.raises(ConsentMLError) as excinfo:
+        SnowflakeSource(connection=secret_conn, query=QUERY,
+                        subject_id_col="PATIENT_ID").load()
+    exc = excinfo.value
+    full = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert "sekret_user" not in full
+    assert "sekret_pass" not in full
+
+
+# --- _connect / query-failure seams ----------------------------------------
+
+
+def test_connect_calls_connector_connect_with_the_connection_dict(monkeypatch):
+    from consentml.sources import snowflake as sf
+
+    sentinel = object()
+    calls = {}
+
+    class _FakeConnector:
+        def connect(self, **kwargs):
+            calls["kwargs"] = kwargs
+            return sentinel
+
+    monkeypatch.setattr(sf, "_import_connector", lambda: _FakeConnector())
+    conn_dict = {"account": "a", "user": "u", "password": "p"}
+    result = sf._connect(conn_dict)
+    assert result is sentinel
+    assert calls["kwargs"] == conn_dict
+
+
+def test_fetch_raises_consentml_error_when_the_training_query_fails(monkeypatch):
+    # EXPLAIN degrades to unavailable (empty row), then the real query's
+    # cur.execute raises a genuine connector.errors.Error subclass -- this
+    # must surface as ConsentMLError("the training query failed: ...").
+    from consentml.sources import snowflake as sf
+    connector = sf._import_connector()
+
+    class _FailingCursor:
+        def execute(self, sql):
+            if sql.startswith("EXPLAIN"):
+                return self
+            raise connector.errors.ProgrammingError("boom")
+
+        def fetchone(self):
+            return None  # EXPLAIN row absent -> _ExplainUnavailable
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _FailingConnection:
+        def cursor(self):
+            return _FailingCursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sf, "_connect", lambda connection: _FailingConnection())
+    with pytest.raises(ConsentMLError, match="training query failed"):
+        SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load()

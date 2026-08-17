@@ -18,8 +18,8 @@ from pathlib import Path
 
 from consentml.store import (
     GENESIS_HASH,
-    LineageStore,
     default_db_path,
+    open_store,
     provenance_hash,
 )
 
@@ -402,7 +402,7 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
             ],
             generated_at=datetime.now(timezone.utc).isoformat(),
         )
-    store = LineageStore(db_path=db_path)
+    store = open_store(db_path=db_path)
     try:
         entries = store.audit_entries()
         parsed, findings = _parse_payloads(entries)

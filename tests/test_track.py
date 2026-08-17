@@ -3,7 +3,7 @@ import pytest
 
 from consentml import ConsentMLError, track
 from consentml.sources import DataFrameSource, SourceResult
-from consentml.store import LineageStore
+from consentml.store import SQLiteLineageStore
 
 
 def _df():
@@ -43,7 +43,7 @@ def test_provenance_from_the_source_is_recorded(tmp_path):
         return "model"
 
     train()
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     provenance = store._conn.execute(
         "SELECT provenance FROM training_runs"
     ).fetchone()[0]
@@ -79,7 +79,7 @@ def test_a_crashed_training_function_records_nothing(tmp_path):
 
     with pytest.raises(ValueError):
         train()
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     assert store._conn.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0] == 0
     store.close()
 
@@ -93,7 +93,7 @@ def test_hash_subject_ids_false_stores_raw_ids(tmp_path):
         return "model"
 
     train()
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     keys = {r[0] for r in store._conn.execute("SELECT subject_key FROM subjects")}
     store.close()
     assert keys == {"P1", "P2"}

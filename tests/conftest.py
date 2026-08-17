@@ -46,7 +46,7 @@ GENESIS = "0" * 64
 def append_audit_entry(path, event_type, payload) -> str:
     """Append one hash-chained audit_log row to the database at path.
 
-    Mirrors LineageStore._append_audit_entry's arithmetic exactly (sha256 of
+    Mirrors SQLiteLineageStore._append_audit_entry's arithmetic exactly (sha256 of
     prev_hash + timestamp + event_type + payload, prev_hash taken from the
     current last row or GENESIS if the log is empty). Extracted here because
     this same arithmetic used to be re-derived independently in
@@ -264,6 +264,49 @@ def pg_dsn():
             ":5432/consentml_test"
         )
     return dsn
+
+
+@pytest.fixture
+def snowflake_conn():
+    """Connection dict for a real Snowflake test account.
+
+    Skips (does NOT fail) when unconfigured: unlike the Postgres fixture, no
+    local Snowflake can be stood up in CI, so absence is the normal case for
+    most runs. The gate is the account var; when it is present the rest are
+    required and their absence is a real error.
+    """
+    account = os.environ.get("CONSENTML_SNOWFLAKE_TEST_ACCOUNT")
+    if not account:
+        pytest.skip("CONSENTML_SNOWFLAKE_TEST_ACCOUNT not set; skipping live test")
+    conn = {
+        "account": account,
+        "user": os.environ["CONSENTML_SNOWFLAKE_TEST_USER"],
+        "database": os.environ["CONSENTML_SNOWFLAKE_TEST_DATABASE"],
+        "schema": os.environ.get("CONSENTML_SNOWFLAKE_TEST_SCHEMA", "PUBLIC"),
+        "warehouse": os.environ["CONSENTML_SNOWFLAKE_TEST_WAREHOUSE"],
+    }
+    role = os.environ.get("CONSENTML_SNOWFLAKE_TEST_ROLE")
+    if role:
+        conn["role"] = role
+    # Auth, in preference order: a programmatic access token (PAT), then
+    # user/password, then key-pair. The connection dict is passed straight to
+    # snowflake.connector.connect(); token/authenticator/password/private_key
+    # are all stripped from provenance by _safe_conninfo's allow-list.
+    token = os.environ.get("CONSENTML_SNOWFLAKE_TEST_TOKEN")
+    pw = os.environ.get("CONSENTML_SNOWFLAKE_TEST_PASSWORD")
+    key_file = os.environ.get("CONSENTML_SNOWFLAKE_TEST_PRIVATE_KEY_FILE")
+    if token:
+        conn["authenticator"] = "PROGRAMMATIC_ACCESS_TOKEN"
+        conn["token"] = token
+    elif pw:
+        conn["password"] = pw
+    elif key_file:
+        conn["private_key_file"] = key_file
+    else:
+        raise RuntimeError(
+            "set CONSENTML_SNOWFLAKE_TEST_TOKEN, _PASSWORD, or _PRIVATE_KEY_FILE"
+        )
+    return conn
 
 
 @pytest.fixture

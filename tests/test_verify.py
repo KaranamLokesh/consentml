@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from consentml.store import GENESIS_HASH, LineageStore
+from consentml.store import GENESIS_HASH, SQLiteLineageStore
 from consentml.verify import VerificationReport, verify_audit_log
 
 
@@ -16,7 +16,7 @@ def db(tmp_path):
 
 def _seed(db, n_runs=3):
     """Record n_runs training runs, each with two subjects."""
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         return [
             store.record_training_run(
@@ -83,7 +83,7 @@ def test_clean_log_verifies(db):
 
 
 def test_empty_log_verifies(db):
-    LineageStore(db_path=db).close()
+    SQLiteLineageStore(db_path=db).close()
     report = verify_audit_log(db_path=db)
     assert report.ok is True
     assert report.n_entries == 0
@@ -339,7 +339,7 @@ def test_unlogged_run_is_detected(db):
 
 
 def test_zero_subject_run_is_not_a_mismatch(db):
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_training_run(
             model_name="empty",
@@ -358,7 +358,7 @@ def test_zero_subject_run_is_not_a_mismatch(db):
 
 def test_revocation_entries_are_not_cross_checked(db):
     _seed(db, n_runs=1)
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_revocation(
             subject_key="k", n_affected_runs=99, recommended_actions=[]
@@ -432,7 +432,7 @@ def test_mixed_type_unlogged_run_ids_do_not_raise(db):
     must not crash when it has to compare across types -- which requires
     at least two unlogged run_ids of genuinely different types, or the
     comparison is never actually exercised."""
-    LineageStore(db_path=db).close()
+    SQLiteLineageStore(db_path=db).close()
     _sql(
         db,
         "INSERT INTO training_runs (run_id, model_name, model_hash, provenance, "
@@ -456,7 +456,7 @@ def test_mixed_type_unlogged_run_ids_do_not_raise(db):
 
 def test_head_hash_is_the_last_entry_hash(db):
     _seed(db, n_runs=2)
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         expected = store.audit_entries()[-1]["entry_hash"]
     finally:
@@ -465,7 +465,7 @@ def test_head_hash_is_the_last_entry_hash(db):
 
 
 def test_head_hash_of_empty_log_is_genesis(db):
-    LineageStore(db_path=db).close()
+    SQLiteLineageStore(db_path=db).close()
     assert verify_audit_log(db_path=db).head_hash == GENESIS_HASH
 
 
@@ -527,7 +527,7 @@ def test_rewrite_before_the_anchor_point_is_still_caught(db):
 def test_empty_log_anchored_against_genesis_verifies(db):
     # Fresh-install case: the operator anchors the genesis head before any
     # training runs are recorded, and that anchor must still validate later.
-    LineageStore(db_path=db).close()
+    SQLiteLineageStore(db_path=db).close()
     report = verify_audit_log(db_path=db, expected_head=GENESIS_HASH)
     assert report.ok is True
     assert report.findings == []
@@ -538,7 +538,7 @@ def test_empty_log_anchored_against_non_genesis_is_mismatch(db):
     # its entries, after an anchor was taken. The now-empty log's head is
     # GENESIS_HASH, which must not match a previously anchored non-genesis
     # value.
-    LineageStore(db_path=db).close()
+    SQLiteLineageStore(db_path=db).close()
     report = verify_audit_log(db_path=db, expected_head="f" * 64)
     assert report.ok is False
     assert "head_mismatch" in _codes(report)
@@ -550,7 +550,7 @@ def test_wholesale_rewrite_is_caught_by_the_anchor(db):
 
     # Rewrite history from genesis: drop the log and rebuild it cleanly.
     _sql(db, "DELETE FROM audit_log")
-    store = LineageStore(db_path=db)
+    store = SQLiteLineageStore(db_path=db)
     try:
         store.record_revocation(
             subject_key="k", n_affected_runs=0, recommended_actions=[]
@@ -628,7 +628,7 @@ def test_verify_detects_tampering_in_a_legacy_database(legacy_db):
 
 
 def _one_run(db_path, provenance=None):
-    store = LineageStore(db_path=db_path)
+    store = SQLiteLineageStore(db_path=db_path)
     store.record_training_run(
         model_name="m",
         model_hash="mh",
@@ -799,7 +799,7 @@ def test_legacy_run_with_two_entries_is_counted_once(tmp_path, append_entry):
     twice (e.g. re-recorded, or simply two audit entries referencing the
     same run_id) must still contribute 1 to the count, not 2."""
     db = tmp_path / "l.db"
-    LineageStore(db_path=db).close()  # provision the v2 schema
+    SQLiteLineageStore(db_path=db).close()  # provision the v2 schema
     _insert_legacy_training_run(db, "legacy-run")
     payload = json.dumps(
         {
@@ -825,7 +825,7 @@ def test_payload_with_neither_provenance_key_is_malformed_not_legacy(tmp_path, a
     missing both keys is a shape no schema version ever wrote and must be
     flagged as malformed, not silently folded into "merely old"."""
     db = tmp_path / "l.db"
-    LineageStore(db_path=db).close()  # provision the v2 schema
+    SQLiteLineageStore(db_path=db).close()  # provision the v2 schema
     _insert_legacy_training_run(db, "legacy-run")
     payload = json.dumps(
         {

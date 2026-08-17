@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from consentml.hashing import hash_subject_id
 from consentml.revoke import revoke
-from consentml.store import LineageStore
+from consentml.store import open_store
 from consentml.verify import verify_audit_log
 
 # Findings that mean there is nothing to read at the given path, as opposed
@@ -155,7 +155,7 @@ def build_dossier(*, subject_id, db_path=None) -> Dossier:
 
     report = revoke(subject_id=subject_id, db_path=db_path, dry_run=True)
 
-    store = LineageStore(db_path=db_path)
+    store = open_store(db_path=db_path)
     try:
         events = _revocation_events_for(store, subject_key)
     finally:
