@@ -41,8 +41,8 @@ class ShimCursor:
 
 
 class ShimConnection:
-    def __init__(self):
-        self._conn = sqlite3.connect(":memory:")
+    def __init__(self, db=":memory:"):
+        self._conn = sqlite3.connect(db)
 
     def cursor(self):
         return ShimCursor(self._conn.cursor())
@@ -59,6 +59,20 @@ class ShimConnection:
 
 def shim_connect(connection: dict) -> ShimConnection:
     return ShimConnection()
+
+
+def persistent_shim_connect(db_path):
+    """Return a _connect-compatible callable bound to one sqlite FILE.
+
+    Every call reopens the same file, so writes from a prior open (e.g. an
+    @track record) are visible to a later open (e.g. a verify_audit_log read).
+    shim_connect above stays :memory:-per-call for single-connection tests."""
+    db = str(db_path)
+
+    def _connect(connection: dict) -> ShimConnection:
+        return ShimConnection(db)
+
+    return _connect
 
 
 # --- Scripted double for SnowflakeSource -----------------------------------
