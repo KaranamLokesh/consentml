@@ -3,7 +3,7 @@ import pytest
 
 from consentml import ConsentMLError, track
 from consentml.sources import DataFrameSource, SourceResult
-from consentml.store import SQLiteLineageStore
+from consentml.store import SQLiteLineageStore, open_store
 
 
 def _df():
@@ -114,3 +114,40 @@ def test_any_source_object_works(tmp_path):
         return "model"
 
     assert train() == "model"
+
+
+def test_track_writes_lineage_to_a_snowflake_store_target(tmp_path, monkeypatch):
+    from consentml import snowflake_store as sfs
+    from tests.fakes.snowflake import persistent_shim_connect
+
+    monkeypatch.setattr(sfs, "_connect", persistent_shim_connect(tmp_path / "sf.sqlite"))
+    conn = {"account": "a", "user": "u", "password": "p",
+            "database": "D", "schema": "S", "warehouse": "W"}
+
+    @track(model_name="m", source=DataFrameSource(_df(), subject_id_col="pid"),
+           store=conn)
+    def train(df):
+        return "model"
+
+    assert train() == "model"
+
+    store = open_store(conn)
+    try:
+        run = store.latest_run_for_model("m")
+        assert run is not None
+        assert run["model_name"] == "m"
+        entries = store.audit_entries()
+        assert len(entries) == 1
+        assert entries[0]["event_type"] == "training_run"
+    finally:
+        store.close()
+
+
+def test_track_rejects_both_db_path_and_store(tmp_path):
+    with pytest.raises(ConsentMLError):
+        @track(model_name="m",
+               source=DataFrameSource(_df(), subject_id_col="pid"),
+               db_path=tmp_path / "l.db",
+               store={"account": "a"})
+        def train(df):
+            return "model"
