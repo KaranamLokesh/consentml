@@ -21,6 +21,11 @@ def track(*, model_name, source, hash_subject_ids=True, db_path=None, store=None
     The model is hashed (SHA-256 of its pickle) and the lineage record is
     written only after training completes, so a training run that raises
     leaves nothing behind.
+
+    Lineage is written to a store: pass `store` as a connection dict to route
+    to a Snowflake lineage store via `open_store`, or omit it (and optionally
+    pass `db_path`) for the default SQLite store. `db_path` and `store` are
+    mutually exclusive; passing both raises ConsentMLError at decoration time.
     """
 
     if store is not None and db_path is not None:
