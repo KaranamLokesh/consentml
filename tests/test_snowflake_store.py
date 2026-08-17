@@ -122,6 +122,120 @@ def test_record_revocation_returns_the_actual_audit_row_id(monkeypatch):
         store.close()
 
 
+def test_import_connector_returns_the_real_module():
+    from consentml import snowflake_store as sfs
+    import snowflake.connector as expected
+
+    assert sfs._import_connector() is expected
+
+
+def test_import_connector_raises_consentml_error_when_missing(monkeypatch):
+    import builtins
+    from consentml import snowflake_store as sfs
+    from consentml import ConsentMLError
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("snowflake"):
+            raise ImportError("no snowflake connector")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ConsentMLError, match="pip install"):
+        sfs._import_connector()
+
+
+def test_connect_sets_qmark_paramstyle_and_autocommit_false(monkeypatch):
+    from consentml import snowflake_store as sfs
+
+    calls = {}
+
+    class _FakeConnector:
+        def connect(self, **params):
+            calls.update(params)
+            return "sentinel-conn"
+
+    monkeypatch.setattr(sfs, "_import_connector", lambda: _FakeConnector())
+    result = sfs._connect({"account": "a"})
+    assert result == "sentinel-conn"
+    assert calls == {"account": "a", "paramstyle": "qmark", "autocommit": False}
+
+
+class _FailOnMatch:
+    """Cursor wrapper that raises on the first execute/executemany whose SQL
+    contains `trigger`, otherwise forwards to the real (shim) cursor."""
+
+    def __init__(self, inner, trigger):
+        self._inner = inner
+        self._trigger = trigger
+
+    def execute(self, sql, params=()):
+        if self._trigger in sql:
+            raise RuntimeError("boom")
+        return self._inner.execute(sql, params)
+
+    def executemany(self, sql, seq):
+        if self._trigger in sql:
+            raise RuntimeError("boom")
+        return self._inner.executemany(sql, seq)
+
+    def fetchone(self):
+        return self._inner.fetchone()
+
+    def fetchall(self):
+        return self._inner.fetchall()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return self._inner.__exit__(*a)
+
+
+def test_record_training_run_rolls_back_on_failure(monkeypatch):
+    store = _store(monkeypatch)
+    try:
+        real_cursor = store._conn.cursor
+        monkeypatch.setattr(
+            store._conn, "cursor",
+            lambda: _FailOnMatch(real_cursor(), "INSERT INTO subject_index"),
+        )
+        with pytest.raises(RuntimeError, match="boom"):
+            store.record_training_run(
+                model_name="m", model_hash="h", provenance={"kind": "snowflake"},
+                subject_ids_hashed=True, subject_id_values=["a"],
+                started_at="2026-01-01T00:00:00+00:00", finished_at="2026-01-01T00:00:01+00:00")
+        # No partial row from the failed transaction persisted.
+        assert store.all_run_ids() == set()
+        assert store.audit_entries() == []
+    finally:
+        store.close()
+
+
+def test_record_revocation_rolls_back_on_failure(monkeypatch):
+    store = _store(monkeypatch)
+    try:
+        store.record_training_run(
+            model_name="m", model_hash="h", provenance={"kind": "snowflake"},
+            subject_ids_hashed=True, subject_id_values=["a"],
+            started_at="2026-01-01T00:00:00+00:00", finished_at="2026-01-01T00:00:01+00:00")
+        before = store.audit_entries()
+
+        real_cursor = store._conn.cursor
+        monkeypatch.setattr(
+            store._conn, "cursor",
+            lambda: _FailOnMatch(real_cursor(), "INSERT INTO audit_log"),
+        )
+        with pytest.raises(RuntimeError, match="boom"):
+            store.record_revocation(subject_key="hashed-a", n_affected_runs=1,
+                                    recommended_actions=["retrain"])
+        # No partial revocation entry from the failed transaction persisted.
+        assert store.audit_entries() == before
+    finally:
+        store.close()
+
+
 def test_sqlite_and_snowflake_produce_identical_audit_chains(monkeypatch, tmp_path):
     from consentml.store import SQLiteLineageStore
 

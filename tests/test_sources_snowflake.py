@@ -156,6 +156,34 @@ def test_referenced_tables_are_sorted(monkeypatch):
     assert p["referenced_tables"] == ["B.S.AAA", "B.S.ZZZ"]
 
 
+def test_explain_reports_a_bare_string_table_value(monkeypatch):
+    # _relations has two branches under a _TABLE_KEYS hit: a bare string value
+    # (found.add) and a list of strings (found.update). The other tests above
+    # only ever exercise "objects": [...] (a list); this plan uses
+    # "Relation Name": "..." (a bare string) to hit the sibling branch.
+    from consentml.sources import snowflake as sf
+    plan = {"Operations": [[{"Relation Name": "DB.PUBLIC.PATIENTS"}]]}
+    monkeypatch.setattr(sf, "_connect", lambda c: FakeSnowflakeConnection(
+        _script_with_plan([("P1", 30)], plan)))
+    p = SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load().provenance
+    assert p["referenced_tables"] == ["DB.PUBLIC.PATIENTS"]
+    assert p["referenced_tables_source"] == "explain"
+
+
+def test_run_explain_raises_explain_unavailable_on_unparseable_json():
+    from consentml.sources.snowflake import _run_explain, _ExplainUnavailable
+
+    class _UnparseableCursor:
+        def execute(self, sql):
+            return self
+
+        def fetchone(self):
+            return ("not json{",)
+
+    with pytest.raises(_ExplainUnavailable):
+        _run_explain(_UnparseableCursor(), "SELECT 1")
+
+
 # --- Task 6: connection-failure credential safety --------------------------
 
 
@@ -175,3 +203,58 @@ def test_credentials_never_appear_on_a_connection_failure(monkeypatch):
     full = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     assert "sekret_user" not in full
     assert "sekret_pass" not in full
+
+
+# --- _connect / query-failure seams ----------------------------------------
+
+
+def test_connect_calls_connector_connect_with_the_connection_dict(monkeypatch):
+    from consentml.sources import snowflake as sf
+
+    sentinel = object()
+    calls = {}
+
+    class _FakeConnector:
+        def connect(self, **kwargs):
+            calls["kwargs"] = kwargs
+            return sentinel
+
+    monkeypatch.setattr(sf, "_import_connector", lambda: _FakeConnector())
+    conn_dict = {"account": "a", "user": "u", "password": "p"}
+    result = sf._connect(conn_dict)
+    assert result is sentinel
+    assert calls["kwargs"] == conn_dict
+
+
+def test_fetch_raises_consentml_error_when_the_training_query_fails(monkeypatch):
+    # EXPLAIN degrades to unavailable (empty row), then the real query's
+    # cur.execute raises a genuine connector.errors.Error subclass -- this
+    # must surface as ConsentMLError("the training query failed: ...").
+    from consentml.sources import snowflake as sf
+    connector = sf._import_connector()
+
+    class _FailingCursor:
+        def execute(self, sql):
+            if sql.startswith("EXPLAIN"):
+                return self
+            raise connector.errors.ProgrammingError("boom")
+
+        def fetchone(self):
+            return None  # EXPLAIN row absent -> _ExplainUnavailable
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _FailingConnection:
+        def cursor(self):
+            return _FailingCursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sf, "_connect", lambda connection: _FailingConnection())
+    with pytest.raises(ConsentMLError, match="training query failed"):
+        SnowflakeSource(connection=CONN, query=QUERY, subject_id_col="PATIENT_ID").load()
