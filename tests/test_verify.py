@@ -5,7 +5,8 @@ import sqlite3
 
 import pytest
 
-from consentml.store import GENESIS_HASH, SQLiteLineageStore
+from consentml import ConsentMLError
+from consentml.store import GENESIS_HASH, SQLiteLineageStore, open_store
 from consentml.verify import VerificationReport, verify_audit_log
 
 
@@ -842,3 +843,55 @@ def test_payload_with_neither_provenance_key_is_malformed_not_legacy(tmp_path, a
     assert not report.ok
     assert [f.code for f in report.findings] == ["malformed_payload"]
     assert report.n_legacy_runs == 0
+
+
+def _sf(tmp_path, monkeypatch):
+    from consentml import snowflake_store as sfs
+    from tests.fakes.snowflake import persistent_shim_connect
+    monkeypatch.setattr(sfs, "_connect", persistent_shim_connect(tmp_path / "sf.sqlite"))
+    return {"account": "a", "user": "u", "password": "p",
+            "database": "D", "schema": "S", "warehouse": "W"}
+
+
+def test_verify_over_snowflake_store_is_ok(tmp_path, monkeypatch):
+    conn = _sf(tmp_path, monkeypatch)
+    store = open_store(conn)
+    try:
+        store.record_training_run(
+            model_name="m", model_hash="h", provenance={"kind": "demo"},
+            subject_ids_hashed=True, subject_id_values=["a", "b"],
+            started_at="2026-01-01T00:00:00+00:00",
+            finished_at="2026-01-01T00:00:01+00:00")
+    finally:
+        store.close()
+
+    report = verify_audit_log(store=conn)
+    assert report.ok is True
+    assert report.n_entries == 1
+
+
+def test_verify_over_snowflake_store_detects_tampering(tmp_path, monkeypatch):
+    conn = _sf(tmp_path, monkeypatch)
+    store = open_store(conn)
+    try:
+        store.record_training_run(
+            model_name="m", model_hash="h", provenance={"kind": "demo"},
+            subject_ids_hashed=True, subject_id_values=["a"],
+            started_at="2026-01-01T00:00:00+00:00",
+            finished_at="2026-01-01T00:00:01+00:00")
+        # Corrupt the stored payload without recomputing the hash chain.
+        cur = store._conn.cursor()
+        with cur:
+            cur.execute("UPDATE audit_log SET payload = ?", ('{"tampered": true}',))
+        store._conn.commit()
+    finally:
+        store.close()
+
+    report = verify_audit_log(store=conn)
+    assert report.ok is False
+    assert report.findings
+
+
+def test_verify_rejects_both_db_path_and_store(tmp_path):
+    with pytest.raises(ConsentMLError):
+        verify_audit_log(db_path=tmp_path / "l.db", store={"account": "a"})
