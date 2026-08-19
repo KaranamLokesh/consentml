@@ -61,9 +61,11 @@ consentml = "consentml.cli:main"
 packages = ["src/consentml"]
 
 [tool.hatch.build.targets.sdist]
+# tests/ is deliberately not shipped: it is not needed to install or use the
+# package, and keeping it out of the sdist keeps the docs-gate test's fixtures
+# out of the published distribution.
 include = [
     "src/consentml",
-    "tests",
     "examples",
     "docs",
     "README.md",
