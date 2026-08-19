@@ -16,6 +16,18 @@ The public API. Everything here is importable directly from `consentml`.
 
 ::: consentml.sources.postgres.PostgresSource
 
+::: consentml.sources.snowflake.SnowflakeSource
+
+## Stores
+
+::: consentml.store.open_store
+
+::: consentml.store.LineageStore
+
+::: consentml.store.SQLiteLineageStore
+
+::: consentml.snowflake_store.SnowflakeLineageStore
+
 ## Revocation
 
 ::: consentml.revoke

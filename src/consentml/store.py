@@ -196,6 +196,8 @@ class LineageStore(abc.ABC):
 
 
 class SQLiteLineageStore(LineageStore):
+    """The default, file-backed LineageStore, persisting lineage in SQLite."""
+
     def __init__(self, db_path=None):
         self.db_path = Path(db_path) if db_path is not None else default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

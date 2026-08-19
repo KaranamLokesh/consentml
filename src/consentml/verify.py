@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from consentml.errors import ConsentMLError
 from consentml.store import (
     GENESIS_HASH,
     default_db_path,
@@ -341,7 +342,50 @@ def _is_lineage_database(db) -> bool:
         conn.close()
 
 
-def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
+def _verify_opened_store(store, expected_head) -> "VerificationReport":
+    try:
+        entries = store.audit_entries()
+        parsed, findings = _parse_payloads(entries)
+        findings += _check_chain(entries)
+        reference_findings, n_legacy = _check_references(entries, parsed, store)
+        findings += reference_findings
+        head_hash = entries[-1]["entry_hash"] if entries else GENESIS_HASH
+        if expected_head is not None:
+            # expected_head is caller-supplied and may be any type, including
+            # unhashable ones (a list, a dict) -- a set (and `in` against it)
+            # would raise on those. A linear == scan never raises for any
+            # pair of types, so use that even though it costs O(n); this
+            # function already makes several O(n) passes over entries, and
+            # audit logs are small.
+            known = [GENESIS_HASH] + [e["entry_hash"] for e in entries]
+            if not any(expected_head == h for h in known):
+                findings.append(
+                    VerificationFinding(
+                        entry_id=None,
+                        code="head_mismatch",
+                        detail=(
+                            "the anchored head is not present anywhere in "
+                            "the current chain; history has been rewritten "
+                            "or truncated"
+                        ),
+                    )
+                )
+        findings.sort(key=lambda f: (f.entry_id is None, f.entry_id or 0))
+        return VerificationReport(
+            ok=not findings,
+            n_entries=len(entries),
+            head_hash=head_hash,
+            findings=findings,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            n_legacy_runs=n_legacy,
+        )
+    finally:
+        store.close()
+
+
+def verify_audit_log(
+    *, db_path=None, store=None, expected_head=None
+) -> VerificationReport:
     """Verify the audit log's hash chain and its agreement with the tables.
 
     A hash chain alone cannot detect a wholesale rewrite from genesis. Pass
@@ -356,7 +400,20 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
     entries appended after it -- a sophisticated attacker can append
     validly-chained forged entries past the anchor, and no anchor taken
     before those entries can detect that.
+
+    Pass store= (a connection dict, e.g. for Snowflake) instead of db_path=
+    to verify a non-SQLite target; db_path and store are mutually exclusive.
+    A Snowflake target has no file to pre-flight, so a never-written chain
+    verifies as ok with n_entries=0 rather than reporting missing_database.
     """
+    if store is not None and db_path is not None:
+        raise ConsentMLError("pass either db_path or store, not both")
+    if store is not None:
+        # Snowflake (or any non-SQLite target): no file to probe. Opening the
+        # store idempotently ensures its tables, so a never-written chain
+        # verifies as ok with n_entries=0 -- acceptable, because a connection
+        # dict is an explicit target, unlike a typo-able filesystem path.
+        return _verify_opened_store(open_store(store), expected_head)
     db = Path(db_path) if db_path is not None else default_db_path()
     if not db.exists():
         # LineageStore.__init__ would create the parent directories and the
@@ -402,42 +459,4 @@ def verify_audit_log(*, db_path=None, expected_head=None) -> VerificationReport:
             ],
             generated_at=datetime.now(timezone.utc).isoformat(),
         )
-    store = open_store(db_path=db_path)
-    try:
-        entries = store.audit_entries()
-        parsed, findings = _parse_payloads(entries)
-        findings += _check_chain(entries)
-        reference_findings, n_legacy = _check_references(entries, parsed, store)
-        findings += reference_findings
-        head_hash = entries[-1]["entry_hash"] if entries else GENESIS_HASH
-        if expected_head is not None:
-            # expected_head is caller-supplied and may be any type, including
-            # unhashable ones (a list, a dict) -- a set (and `in` against it)
-            # would raise on those. A linear == scan never raises for any
-            # pair of types, so use that even though it costs O(n); this
-            # function already makes several O(n) passes over entries, and
-            # audit logs are small.
-            known = [GENESIS_HASH] + [e["entry_hash"] for e in entries]
-            if not any(expected_head == h for h in known):
-                findings.append(
-                    VerificationFinding(
-                        entry_id=None,
-                        code="head_mismatch",
-                        detail=(
-                            "the anchored head is not present anywhere in "
-                            "the current chain; history has been rewritten "
-                            "or truncated"
-                        ),
-                    )
-                )
-        findings.sort(key=lambda f: (f.entry_id is None, f.entry_id or 0))
-        return VerificationReport(
-            ok=not findings,
-            n_entries=len(entries),
-            head_hash=head_hash,
-            findings=findings,
-            generated_at=datetime.now(timezone.utc).isoformat(),
-            n_legacy_runs=n_legacy,
-        )
-    finally:
-        store.close()
+    return _verify_opened_store(open_store(db_path=db_path), expected_head)

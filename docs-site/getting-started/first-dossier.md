@@ -56,7 +56,7 @@ consentml export --subject-id user@example.com --db lineage.db --format json --o
       "started_at": "2026-08-14T04:00:34.643178+00:00"
     }
   ],
-  "consentml_version": "0.1.1",
+  "consentml_version": "0.2.0",
   "database_found": true,
   "generated_at": "2026-08-14T04:00:35.281337+00:00",
   "head_hash": "02f4d018a952dde6409661f2762115e20137df2185033a255ee85235bb3814b5",

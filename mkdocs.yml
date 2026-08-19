@@ -61,6 +61,7 @@ nav:
       - Your first dossier: getting-started/first-dossier.md
   - Guides:
       - Postgres: guides/postgres.md
+      - Snowflake: guides/snowflake.md
       - Migrating a database: guides/migrating.md
       - Anchoring the head hash: guides/anchoring.md
       - Using exit codes in CI: guides/ci.md

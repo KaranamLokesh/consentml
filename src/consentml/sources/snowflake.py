@@ -88,6 +88,8 @@ def _run_explain(cur, query):
 
 
 class SnowflakeSource:
+    """Track a training set read from Snowflake with arbitrary SELECT SQL."""
+
     def __init__(self, *, connection, query, subject_id_col):
         _import_connector()  # fail fast with a clear message if the extra is missing
         self._connection = dict(connection)
