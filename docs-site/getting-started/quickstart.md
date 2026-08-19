@@ -5,6 +5,12 @@ models a subject's data reached, hand over a dossier, and check that the
 audit trail backing it hasn't been tampered with. Every command below is one
 you can run yourself, in order, in an empty directory.
 
+!!! tip "Prefer a notebook?"
+    [`consentml_demo.ipynb`](https://github.com/KaranamLokesh/consentml/blob/main/examples/consentml_demo.ipynb)
+    is this same end-to-end workflow as a runnable notebook — train with
+    lineage, revoke, verify, and export a dossier — on a synthetic in-memory
+    dataset. It renders on GitHub without running anything.
+
 ## Install
 
 ```bash
