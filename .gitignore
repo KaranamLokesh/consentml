@@ -20,3 +20,6 @@ docs/superpowers/
 
 # git worktrees
 .worktrees/
+
+# forbidden-term list for the docs gate (never commit; public repo)
+.docs-forbidden-terms

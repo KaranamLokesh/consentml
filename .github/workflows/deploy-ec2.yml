@@ -16,10 +16,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Same guard the GitHub Pages workflow uses: a forbidden term must never
-      # reach the served site, even a build we would otherwise throw away.
+      # Same guard the docs workflow uses: a forbidden term must never reach
+      # the served site. The term list comes from a repository secret, never
+      # committed; fail closed if it is missing so a deploy can never skip the
+      # gate silently.
       - name: Check for forbidden terms in published docs
-        run: ./scripts/check-docs-terms.sh
+        env:
+          CONSENTML_DOCS_TERMS: ${{ secrets.DOCS_FORBIDDEN_TERMS }}
+        run: |
+          if [ -z "${CONSENTML_DOCS_TERMS}" ]; then
+            echo "::error::DOCS_FORBIDDEN_TERMS secret is not set; refusing to deploy without the term gate"
+            exit 1
+          fi
+          ./scripts/check-docs-terms.sh
 
       - uses: actions/setup-python@v5
         with:

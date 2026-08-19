@@ -1,45 +1,54 @@
 #!/usr/bin/env bash
-# Fail if petition framing reaches anything published.
+# Fail if any project-specific forbidden term reaches anything published.
 #
-# The Why pages are rewritten from a design document written for a different
-# audience. This gate is mechanical on purpose: prose review protects the
-# first draft, a grep protects every later edit.
+# The term list is supplied out-of-band, never committed: this repo is public,
+# so the words themselves must not live in it. Provide them either as
+#   CONSENTML_DOCS_TERMS='alpha|beta|gamma'   (a regex alternation body)
+# or in a git-ignored file at the repo root, one term per line:
+#   .docs-forbidden-terms
+# CI supplies CONSENTML_DOCS_TERMS from a repository secret; a maintainer's
+# local checkout uses the git-ignored file. With no list configured the scan
+# is skipped (exit 0) -- there is nothing project-specific to enforce, and a
+# contributor without the list has nothing to leak. The publish workflows
+# require the secret separately, so the deploy path never skips silently.
 #
 # Usage: check-docs-terms.sh [PATH...]
-#   With no arguments, scans every file git tracks (via `git ls-files`), so
-#   anything that ships is covered instead of whatever a hardcoded path list
-#   remembered to include -- except this script and its own test file, which
-#   legitimately contain the terms.
-#   With arguments, scans exactly those paths (recursively for directories),
-#   the same way this script has always worked; paths that do not exist are
-#   skipped.
+#   With no arguments, scans every file git tracks (via `git ls-files`).
+#   With arguments, scans exactly those paths (recursively for directories);
+#   paths that do not exist are skipped.
 set -uo pipefail
 
-# Run from the repo root so `git ls-files` and the excluded paths below
-# resolve the same way regardless of where this script is invoked from.
+# Run from the repo root so `git ls-files` and the term-file path resolve the
+# same way regardless of where this script is invoked from.
 if REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     cd "$REPO_ROOT" || exit 1
 fi
 
-# Leading \b only, deliberately no trailing boundary: bare terms and their
-# inflections (petitions, petitioner) must match, but substrings inside an
-# unrelated word (repetition, competition) must not.
-TERMS='\b(EB1|petition|USCIS|adjudicator|immigration|criterion)'
+# Resolve the term list: environment first, then the git-ignored file.
+TERM_FILE="${CONSENTML_DOCS_TERMS_FILE:-.docs-forbidden-terms}"
+TERMS_BODY="${CONSENTML_DOCS_TERMS:-}"
+if [ -z "$TERMS_BODY" ] && [ -f "$TERM_FILE" ]; then
+    # One term per line; blank lines and #-comments ignored; joined with '|'.
+    TERMS_BODY="$(grep -vE '^[[:space:]]*(#|$)' "$TERM_FILE" | paste -sd '|' -)"
+fi
 
-# This gate's own implementation and its test suite legitimately contain the
-# terms; nothing else that ships should.
-EXCLUDE=(scripts/check-docs-terms.sh tests/test_docs_gate.py)
+if [ -z "$TERMS_BODY" ]; then
+    echo "check-docs-terms: no forbidden-term list configured; skipping" \
+         "(set CONSENTML_DOCS_TERMS or create $TERM_FILE)"
+    exit 0
+fi
+
+# Leading \b only, deliberately no trailing boundary: bare terms and their
+# inflections (plurals, agent nouns) must match, but a term appearing as a
+# substring inside an unrelated word must not.
+TERMS="\b(${TERMS_BODY})"
 
 if [ "$#" -gt 0 ]; then
     CANDIDATES=("$@")
 else
     CANDIDATES=()
     while IFS= read -r f; do
-        skip=0
-        for ex in "${EXCLUDE[@]}"; do
-            [ "$f" = "$ex" ] && skip=1 && break
-        done
-        [ "$skip" -eq 0 ] && CANDIDATES+=("$f")
+        CANDIDATES+=("$f")
     done < <(git ls-files 2>/dev/null)
 fi
 

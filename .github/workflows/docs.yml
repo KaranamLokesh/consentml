@@ -12,9 +12,18 @@ jobs:
       - uses: actions/checkout@v4
 
       # First, before anything is built: a leaked term must never reach an
-      # artifact, even one that is thrown away.
+      # artifact, even one that is thrown away. The term list is supplied from
+      # a repository secret, never committed; fail closed if it is missing so
+      # the gate can never silently skip on the publish path.
       - name: Check for forbidden terms in published docs
-        run: ./scripts/check-docs-terms.sh
+        env:
+          CONSENTML_DOCS_TERMS: ${{ secrets.DOCS_FORBIDDEN_TERMS }}
+        run: |
+          if [ -z "${CONSENTML_DOCS_TERMS}" ]; then
+            echo "::error::DOCS_FORBIDDEN_TERMS secret is not set; refusing to build docs without the term gate"
+            exit 1
+          fi
+          ./scripts/check-docs-terms.sh
 
       - uses: actions/setup-python@v5
         with:
