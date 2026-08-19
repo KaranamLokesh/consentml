@@ -89,6 +89,41 @@ A null subject ID is refused by both sources. A null cannot be revoked, so
 recording one would inflate the run's subject count with a subject no
 revocation could ever match.
 
+### Where the lineage is stored
+
+By default the hash-chained lineage lands in a local SQLite database. To keep
+it in Snowflake instead, pass `store=` a connection dict — `@track` writes the
+audit log there rather than to a file:
+
+```python
+from consentml import track
+from consentml.sources.snowflake import SnowflakeSource
+
+connection = {"account": "xy12345", "user": "svc_ml", "password": "...",
+              "database": "CLINIC", "schema": "PUBLIC", "warehouse": "WH_ML"}
+
+@track(model_name="readmission-risk", store=connection,
+       source=SnowflakeSource(connection=connection, query="...",
+                              subject_id_col="patient_id"))
+def train(df): ...
+```
+
+`store=` and `db_path=` are mutually exclusive. The Snowflake audit log uses
+the same row shape and `entry_hash` formula as SQLite, so the same code
+verifies either backend — pass the same target to verification:
+
+```python
+from consentml import verify_audit_log
+
+report = verify_audit_log(store=connection)
+```
+
+Or drive the store directly with `open_store(connection)` when you record runs
+without `@track`. This is a Python-API feature; the `consentml` CLI is
+SQLite-only. Requires `pip install 'consentml[snowflake]'`. See the
+[Snowflake guide](https://consentml.lokeshkaranam.me/guides/snowflake/) for
+the store schema, the single-writer caveat, and key-pair auth.
+
 ### What provenance records
 
 Postgres runs are recorded with the exact query text and its SHA-256, plus the
