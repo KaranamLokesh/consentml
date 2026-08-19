@@ -58,6 +58,10 @@ Audit log OK: 1 entries, chain intact.
 head: 85d36e6f5c1ff020f9bd0221e1069294c983baa51b080d20f1a1ba101e747eff
 ```
 
+The CLI verifies SQLite databases only. To verify a chain stored in
+Snowflake, use the Python API's `verify_audit_log(store=connection)` — see
+the [Snowflake guide](../guides/snowflake.md#verify-has-a-snowflake-path-through-python).
+
 ## migrate
 
 Upgrades a v0 or v1 lineage database onto the current schema. Gated by
@@ -80,6 +84,11 @@ Migrated: 28.0 KB -> 40.0 KB (+12.0 KB).
 The new schema's tables and indexes add fixed overhead; deduplication only pays off once subjects repeat across many runs.
 Original kept at lineage.db.pre-migration.bak
 ```
+
+Migration applies to SQLite databases only, and has no Snowflake equivalent
+in the CLI or the Python API. The Snowflake lineage store is denormalized and
+has no schema-version progression to migrate — see the
+[Snowflake guide](../guides/snowflake.md#migrate-has-no-snowflake-equivalent-by-design).
 
 ## export
 

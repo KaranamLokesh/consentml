@@ -1,5 +1,12 @@
 # Postgres
 
+!!! example "Runnable example"
+    [`postgres_usage.ipynb`](https://github.com/KaranamLokesh/consentml/blob/main/examples/postgres_usage.ipynb)
+    walks this end to end — seed a Postgres table, train through `@track` with
+    `PostgresSource`, inspect the recorded provenance, and watch the read-only
+    guarantee reject a write. It runs against the repo's test container
+    (`docker compose -f docker-compose.test.yml up -d`).
+
 ## Install
 
 ```bash

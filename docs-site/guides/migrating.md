@@ -7,6 +7,12 @@ or v1 — can still be read but not written to. `consentml verify` and
 `revoke(dry_run=True)` work against it as it is; `@track` and a recording
 `revoke()` call raise until it's migrated onto the current schema.
 
+!!! note "SQLite only"
+    Migration applies to SQLite lineage databases. The Snowflake lineage
+    store is denormalized and has no schema-version progression, so there is
+    no `migrate` operation for it — in the CLI or the Python API. See the
+    [Snowflake guide](snowflake.md#migrate-has-no-snowflake-equivalent-by-design).
+
 ## Running it
 
 ```bash

@@ -1,5 +1,11 @@
 # Snowflake
 
+!!! example "Runnable example"
+    [`snowflake_usage.ipynb`](https://github.com/KaranamLokesh/consentml/blob/main/examples/snowflake_usage.ipynb)
+    walks through both pieces below — `SnowflakeSource` and
+    `SnowflakeLineageStore` — end to end. It needs a real Snowflake account to
+    execute, but every cell is annotated so it reads top-to-bottom without one.
+
 ConsentML integrates with Snowflake in two independent places. You can use
 either on its own:
 
@@ -159,6 +165,47 @@ shape and the `entry_hash` formula are **byte-for-byte identical**. The same
     for you, so two concurrent writers could fork the chain. Coordinating
     multiple writers is an explicit non-goal.
 
-!!! note "CLI stays SQLite-only"
-    The Snowflake lineage store is reached through the Python API. The
-    `consentml` command-line tool operates on local SQLite databases only.
+## CLI commands and their Snowflake equivalents
+
+The `consentml` command-line tool operates on local SQLite databases only —
+every subcommand takes a `--db` file path and none accepts a connection dict
+or `snowflake://` target. Where a Snowflake equivalent exists at all, it lives
+in the Python API:
+
+| CLI (SQLite only) | Snowflake equivalent |
+| --- | --- |
+| `consentml verify --db x.db` | `verify_audit_log(store=connection)` (Python only) |
+| `consentml migrate --db x.db` | **none — see below** |
+| `consentml revoke` / `export` | none (Python API is SQLite-only for these too) |
+
+### `verify` has a Snowflake path — through Python
+
+There is no `consentml verify` flag that points at Snowflake, but the same
+check is available in the Python API by passing `store=`:
+
+```python
+from consentml import verify_audit_log
+
+report = verify_audit_log(store=connection)   # verifies the chain in Snowflake
+print(report.ok)
+```
+
+This is the `store=` target described in
+[the section above](#snowflakelineagestore-the-audit-log-lives-in-snowflake) —
+the identical row shape and `entry_hash` formula mean the same verification
+logic runs regardless of backend.
+
+### `migrate` has no Snowflake equivalent — by design
+
+There is no way to migrate a Snowflake lineage store, in the CLI **or** the
+Python API — `migrate_database()` takes only a `db_path`, never a `store=`.
+This is intentional, not a gap. Migration exists to move a **SQLite** database
+between schema versions (v0 → v1 introduced subject interning; the current
+schema builds on that). The Snowflake store is deliberately **denormalized** —
+no subject-interning table, so there is no schema-version progression for a
+migration to walk. A Snowflake lineage table written by any released version of
+ConsentML is already on the only shape the Snowflake backend uses.
+
+If you need to move lineage *between* SQLite and Snowflake, that is a
+copy/re-record operation, not a migration, and ConsentML does not automate it
+today.
