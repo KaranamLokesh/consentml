@@ -48,10 +48,10 @@ jobs:
       - name: Overlay marketing landing page onto the built site
         run: |
           test -f landing/index.html
-          test -f landing/assets/demo.gif
+          test -f demo/demo.gif
           cp landing/index.html site/index.html
           mkdir -p site/assets
-          cp landing/assets/demo.gif site/assets/demo.gif
+          cp demo/demo.gif site/assets/demo.gif
 
       - name: Deploy site/ to EC2 over rsync
         uses: burnett01/rsync-deployments@7.0.2

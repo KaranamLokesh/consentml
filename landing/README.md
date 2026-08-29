@@ -11,7 +11,8 @@ The docs deploy (`.github/workflows/deploy-ec2.yml`) builds MkDocs into `site/`,
 then overlays this page on top:
 
 - `landing/index.html` → `site/index.html` (replaces the MkDocs homepage)
-- `landing/assets/demo.gif` → `site/assets/demo.gif`
+- `demo/demo.gif` → `site/assets/demo.gif` (the single source-of-truth gif,
+  produced by `demo/demo.tape`)
 
 Every documentation page keeps its own URL (`/getting-started/`, `/guides/`,
 `/reference/`, `/why/`). Only the root `/` becomes the landing page. Both files
