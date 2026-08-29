@@ -8,6 +8,8 @@ pipelines. Add one decorator to your training function; when a user revokes
 consent, ConsentML tells you which deployed models were trained on their data
 and produces a tamper-evident audit trail.
 
+![ConsentML demo: record lineage, verify the audit log, report the models affected by a revocation, and export the dossier](https://raw.githubusercontent.com/KaranamLokesh/consentml/main/demo/demo.gif)
+
 ## Documentation
 
 This README covers the basics. The
