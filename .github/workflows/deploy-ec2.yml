@@ -41,6 +41,18 @@ jobs:
       - name: Build
         run: mkdocs build --strict
 
+      # The custom marketing landing page is served at the site root; the
+      # MkDocs-generated homepage is overwritten by it. Every doc page keeps
+      # its own URL. Both files must live inside site/ because the rsync below
+      # mirrors with --delete: anything not in site/ is removed from the server.
+      - name: Overlay marketing landing page onto the built site
+        run: |
+          test -f landing/index.html
+          test -f landing/assets/demo.gif
+          cp landing/index.html site/index.html
+          mkdir -p site/assets
+          cp landing/assets/demo.gif site/assets/demo.gif
+
       - name: Deploy site/ to EC2 over rsync
         uses: burnett01/rsync-deployments@7.0.2
         with:
