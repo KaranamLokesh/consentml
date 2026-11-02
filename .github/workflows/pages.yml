@@ -1,0 +1,75 @@
+name: Deploy site to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deploy at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same guard the other docs workflows use: a forbidden term must never
+      # reach the served site. The term list comes from a repository secret,
+      # never committed; fail closed if it is missing.
+      - name: Check for forbidden terms in published docs
+        env:
+          CONSENTML_DOCS_TERMS: ${{ secrets.DOCS_FORBIDDEN_TERMS }}
+        run: |
+          if [ -z "${CONSENTML_DOCS_TERMS}" ]; then
+            echo "::error::DOCS_FORBIDDEN_TERMS secret is not set; refusing to deploy without the term gate"
+            exit 1
+          fi
+          ./scripts/check-docs-terms.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # mkdocs and mkdocs-material are pinned to the versions the live site
+      # was built with, so the theme assets keep the same URLs and content.
+      - name: Install
+        run: pip install -e ".[docs]" "mkdocs==1.6.1" "mkdocs-material==9.7.7"
+
+      - name: Build
+        run: mkdocs build --strict
+
+      # The marketing landing page replaces the MkDocs homepage at the site
+      # root; every doc page keeps its own URL. CNAME pins the custom domain.
+      - name: Overlay landing page and custom domain
+        run: |
+          test -f landing/index.html
+          test -f demo/demo.gif
+          cp landing/index.html site/index.html
+          mkdir -p site/assets
+          cp demo/demo.gif site/assets/demo.gif
+          echo "consentml.lokeshkaranam.me" > site/CNAME
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
