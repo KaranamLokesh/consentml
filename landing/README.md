@@ -7,7 +7,7 @@ documentation theme.
 
 ## How it ships
 
-The docs deploy (`.github/workflows/deploy-ec2.yml`) builds MkDocs into `site/`,
+The GitHub Pages deploy (`.github/workflows/pages.yml`) builds MkDocs into `site/`,
 then overlays this page on top:
 
 - `landing/index.html` → `site/index.html` (replaces the MkDocs homepage)
@@ -16,7 +16,8 @@ then overlays this page on top:
 
 Every documentation page keeps its own URL (`/getting-started/`, `/guides/`,
 `/reference/`, `/why/`). Only the root `/` becomes the landing page. Both files
-must live inside `site/` because the rsync step mirrors with `--delete`.
+must live inside `site/` because only that directory is uploaded as the Pages
+artifact.
 
 ## Editing
 
